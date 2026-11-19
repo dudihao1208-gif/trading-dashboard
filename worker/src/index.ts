@@ -3,7 +3,7 @@
  * CORS 仅放行观察台 GitHub Pages 源。
  * 去重状态存在 KV；cron 每 10 分钟跑机会雷达。
  */
-import { collectNews, cleanUrl } from "./news";
+import { collectNews, cleanUrl, parseSourceTime, isReliablePublishTime, formatRome } from "./news";
 import { translateNews } from "./translate";
 import { evaluateNews } from "./score";
 import { getCalendar, getEquities, loadMonitorState, readLastRun, runScheduled, saveMonitorState, saveNewsCache, readAllNewsCaches, type LastRun } from "./monitor";
@@ -126,9 +126,13 @@ export default {
       if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
       const body = await req.json() as { source?: string; items?: { title: string; url: string; source?: string; t?: number; important?: boolean }[] };
       if (!body.source || !Array.isArray(body.items)) return json({ error: "bad body" }, req, 400);
-      const items = body.items.filter((x) => x.title && x.url).map((x) => ({
-        title: x.title, url: cleanUrl(x.url), source: x.source || body.source!, t: x.t || Date.now(), important: x.important !== false,
-      }));
+      const items = body.items.filter((x) => x.title && x.url).map((x) => {
+        const pub = parseSourceTime(x.t);
+        const pubOk = pub > 0 && (x as { pubOk?: boolean }).pubOk !== false && isReliablePublishTime(pub);
+        return {
+          title: x.title, url: cleanUrl(x.url), source: x.source || body.source!, t: pubOk ? pub : 0, pubOk, important: x.important !== false,
+        };
+      });
       await saveNewsCache(env, body.source, items);
       return json({ ok: true, n: items.length }, req);
     }
@@ -180,7 +184,7 @@ export default {
 
     if (path === "/monitor/backfill" || path === "/monitor/filter-news") {
       if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
-      const hours = Math.min(72, Math.max(1, Number(url.searchParams.get("hours") || 24) || 24));
+      const hours = Math.min(72, Math.max(0.1, Number(url.searchParams.get("hours") || 2) || 2));
       let incoming: { title: string; url: string; source?: string; t?: number; important?: boolean; titleZh?: string; summaryZh?: string; excerpt?: string }[] = [];
       if (req.method === "POST") {
         try {
@@ -201,25 +205,34 @@ export default {
       const ev = await evaluateNews(env, merged, hours);
       let translatedPass = ev.newPassed;
       try { translatedPass = await translateNews(env, ev.newPassed) as typeof ev.newPassed; } catch { /* 原文 */ }
-      const slim = (it: (typeof ev.newPassed)[number] | (typeof ev.oldPassed)[number]) => ({
-        title: it.title,
-        titleZh: (it as { titleZh?: string }).titleZh || "",
-        source: it.source,
-        url: cleanUrl(it.url),
-        t: it.t || 0,
-        score: (it as { score?: number }).score,
-        whyZh: (it as { whyZh?: string }).whyZh || "",
-        via: (it as { via?: string }).via,
-        category: (it as { category?: string }).category,
-      });
+      const slim = (it: (typeof ev.newPassed)[number] | (typeof ev.oldPassed)[number]) => {
+        const pub = parseSourceTime(it.t);
+        const ageMin = pub ? Math.round((Date.now() - pub) / 60000) : null;
+        return {
+          title: it.title,
+          titleZh: (it as { titleZh?: string }).titleZh || "",
+          source: it.source,
+          url: cleanUrl(it.url),
+          t: pub,
+          publishedAtRome: pub ? formatRome(pub) : "",
+          ageMinutes: ageMin,
+          olderThan2h: !pub || (ageMin != null && ageMin > 120),
+          pubOk: isReliablePublishTime(pub),
+          score: (it as { score?: number }).score,
+          whyZh: (it as { whyZh?: string }).whyZh || "",
+          via: (it as { via?: string }).via,
+          category: (it as { category?: string }).category,
+        };
+      };
       return json({
         hours,
-        collected: merged.filter((it) => !it.t || it.t >= Date.now() - hours * 3600_000).length,
+        collected: merged.filter((it) => isReliablePublishTime(it.t) && it.t >= Date.now() - hours * 3600_000).length,
         oldCount: ev.oldPassed.length,
         newCount: ev.newPassed.length,
-        oldTitles: ev.oldPassed.map((it) => ({ title: it.title, titleZh: it.titleZh || "", source: it.source, url: cleanUrl(it.url) })),
+        oldTitles: ev.oldPassed.map(slim),
         newTitles: translatedPass.map((it, i) => slim({ ...ev.newPassed[i], ...it })),
-        note: "对照为近 N 小时资讯：旧规则=关键词命中；新规则=评分≥4且故事去重。机会信号依赖当时量价与持仓快照，无法按历史回放。本接口不发 Telegram，不改 lastRun/冷却状态。",
+        olderThan2hInNew: translatedPass.map((it, i) => slim({ ...ev.newPassed[i], ...it })).filter((x) => x.olderThan2h).length,
+        note: "对照为近 N 小时资讯（默认 2 小时）：只采用来源原始发布时间，无可靠发布时间的不推。新规则=评分≥4且 URL/故事去重。本接口不发 Telegram，不改 lastRun/冷却状态。",
       }, req);
     }
 

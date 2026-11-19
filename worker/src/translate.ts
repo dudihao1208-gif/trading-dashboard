@@ -1,6 +1,6 @@
 import type { Env } from "./index";
 import type { NewsItem } from "./news";
-import { cleanUrl, isMostlyEnglish } from "./news";
+import { cleanUrl, isMostlyEnglish, formatRome, isReliablePublishTime, parseSourceTime } from "./news";
 
 const LLM = "@cf/meta/llama-3.2-3b-instruct";
 const M2M = "@cf/meta/m2m100-1.2b";
@@ -12,8 +12,10 @@ export function formatNewsTelegram(it: NewsItem & { whyZh?: string }): string {
   const title = (it.titleZh || it.title || "").trim();
   const why = (it.whyZh || "").trim();
   const url = cleanUrl(it.url || "");
+  const pub = parseSourceTime(it.t);
   const lines = [`📰 ${title}`];
   if (why) lines.push(`为何影响价格：${why}`);
+  if (isReliablePublishTime(pub)) lines.push(`发布时间：${formatRome(pub)}`);
   lines.push(`来源：${it.source || "资讯"}`);
   if (url) lines.push(url);
   return lines.join("\n");

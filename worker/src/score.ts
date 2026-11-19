@@ -1,6 +1,6 @@
 import type { Env } from "./index";
 import type { NewsItem } from "./news";
-import { cleanUrl } from "./news";
+import { cleanUrl, isReliablePublishTime, parseSourceTime } from "./news";
 
 const LLM = "@cf/meta/llama-3.2-3b-instruct";
 const TTL = 7 * 24 * 3600;
@@ -46,21 +46,12 @@ export function parseUsd(text: string): number | null {
 }
 
 
-export function extractPublishedAt(title: string, t?: number, source = ""): number {
-  const m = (title || "").match(/(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})/) || (title || "").match(/(20\d{2})年(\d{1,2})月(\d{1,2})/);
-  let fromTitle = 0;
-  if (m) {
-    const y = +m[1], mo = +m[2], d = +m[3];
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
-      fromTitle = Date.UTC(y, mo - 1, d, 12, 0, 0);
-    }
-  }
-  const raw = t && t < 1e12 ? t * 1000 : (t || 0);
-  // 币安缓存常常把抓取时刻写成 t；无标题日期则不采信
-  if ((source || "").includes("币安") && !fromTitle) return 0;
-  if (fromTitle && (!raw || raw - fromTitle > 36 * 3600_000)) return fromTitle;
-  if (fromTitle) return fromTitle;
-  return raw || 0;
+/** 只采用来源原始发布时间。标题里的业务日期、抓取/缓存时刻一律不用。不可靠则返回 0。 */
+export function extractPublishedAt(title: string, t?: number, source = "", cacheGeneratedAt?: number): number {
+  void title; void source;
+  const ms = parseSourceTime(t ?? 0);
+  if (!isReliablePublishTime(ms, Date.now(), cacheGeneratedAt)) return 0;
+  return ms;
 }
 
 export function isLowValueNews(title: string, source = "", excerpt = ""): boolean {
@@ -233,13 +224,14 @@ function dedupeStories(items: ScoredNews[]): ScoredNews[] {
 export async function evaluateNews(
   env: Env,
   items: NewsItem[],
-  hours = 24,
+  hours = 2,
 ): Promise<{ oldPassed: NewsItem[]; newPassed: ScoredNews[]; scored: ScoredNews[] }> {
-  const cutoff = Date.now() - hours * 3600_000;
+  const now = Date.now();
+  const cutoff = now - hours * 3600_000;
   const windowed = items.filter((it) => {
     if (!it.title || !it.url) return false;
     const at = extractPublishedAt(it.title, it.t, it.source);
-    return at >= cutoff;
+    return at >= cutoff && at <= now + 5 * 60_000;
   });
   const oldSeen = new Set<string>();
   const oldPassed: NewsItem[] = [];

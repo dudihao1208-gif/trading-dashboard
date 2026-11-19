@@ -1,6 +1,6 @@
 const UA = "Mozilla/5.0 (compatible; trading-dashboard-proxy/2.1; +https://dudihao1208-gif.github.io/trading-dashboard/)";
 
-export type NewsItem = { title: string; url: string; source: string; t: number; important?: boolean; excerpt?: string; titleZh?: string; summaryZh?: string };
+export type NewsItem = { title: string; url: string; source: string; t: number; pubOk?: boolean; important?: boolean; excerpt?: string; titleZh?: string; summaryZh?: string };
 
 const TRACK = /^(utm_.*|fbclid|gclid|gclsrc|dclid|msclkid|twclid|yclid|mc_cid|mc_eid|igshid|si|icid|cmpid|ncid|spm|scm|ref|ref_src|_ga|_gl|wbraid|gbraid|ocid|srsltid|mkt_tok)$/i;
 
@@ -18,6 +18,44 @@ export function cleanUrl(raw: string): string {
     return raw;
   }
 }
+
+
+/** 只接受来源字段里的原始发布时间（带时区的 RFC822/ISO，或 Unix 秒/毫秒）。绝不回退到抓取时刻。 */
+export function parseSourceTime(raw: unknown, now = Date.now()): number {
+  if (raw == null || raw === "") return 0;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    if (ms < 1e12 || ms > now + 5 * 60_000) return 0;
+    return Math.round(ms);
+  }
+  const s = String(raw).trim();
+  if (!s) return 0;
+  if (/^\d+(\.\d+)?$/.test(s)) return parseSourceTime(Number(s), now);
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : /GMT|UTC|[A-Z]{3,4}$/.test(s) ? s : s;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 1e12 || ms > now + 5 * 60_000) return 0;
+  return ms;
+}
+
+export function isReliablePublishTime(t?: number, now = Date.now(), cacheGeneratedAt?: number): boolean {
+  const ms = parseSourceTime(t ?? 0, now);
+  if (!ms) return false;
+  if (cacheGeneratedAt && Math.abs(ms - cacheGeneratedAt) < 5 * 60_000) return false;
+  return true;
+}
+
+export function formatRome(ms: number): string {
+  if (!ms) return "";
+  const fmt = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Rome",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(new Date(ms)).replace("T", " ") + " (欧洲/Rome)";
+}
+
+export const NEWS_MAX_AGE_MS = 2 * 3600_000;
 
 /** 标题以拉丁字母为主则视为英文，需翻译；已是中文的不译。 */
 export function isMostlyEnglish(s: string): boolean {
@@ -62,13 +100,17 @@ function parseRss(xml: string, source: string): NewsItem[] {
   for (const b of blocks.slice(0, 20)) {
     const titleRaw = (b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
     const linkRaw = (b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1] || (b.match(/<link[^>]+href="([^"]+)"/i) || [])[1] || "";
-    const date = (b.match(/<pubDate[^>]*>([^<]+)/i) || [])[1];
+    const date = (b.match(/<pubDate[^>]*>([^<]+)/i) || [])[1]
+      || (b.match(/<published[^>]*>([^<]+)/i) || [])[1]
+      || (b.match(/<dc:date[^>]*>([^<]+)/i) || [])[1]
+      || (b.match(/<updated[^>]*>([^<]+)/i) || [])[1]
+      || "";
     const descRaw = (b.match(/<description[^>]*>([\s\S]*?)<\/description>/i) || [])[1] || (b.match(/<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i) || [])[1] || "";
     const title = decodeXml(titleRaw);
     const link = cleanUrl(decodeXml(linkRaw));
     const excerpt = decodeXml(descRaw).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 400);
-    const t = date ? Date.parse(date) : Date.now();
-    if (title && link) items.push({ title, url: link, source, t: Number.isFinite(t) ? t : Date.now(), important: isImportantHeadline(title, source), excerpt: excerpt || undefined });
+    const t = parseSourceTime(decodeXml(date));
+    if (title && link) items.push({ title, url: link, source, t, pubOk: t > 0, important: isImportantHeadline(title, source), excerpt: excerpt || undefined });
   }
   return items;
 }
@@ -89,6 +131,30 @@ async function soft<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try { return await fn(); } catch { return []; }
 }
 
+
+type CmsArt = { title?: string; code?: string; releaseDate?: number | string; publishDate?: number | string; firstOpenDate?: number | string; createTime?: number | string; date?: number | string };
+
+function cmsArticleTime(a: CmsArt | Record<string, unknown> = {}): number {
+  return parseSourceTime(a.publishDate ?? a.releaseDate ?? a.firstOpenDate ?? a.createTime ?? a.date);
+}
+
+async function fillBinancePublishDates(items: NewsItem[], maxDetail = 6): Promise<NewsItem[]> {
+  const need = items.filter((it) => !it.pubOk && /announcement\/[a-f0-9]{12,}/i.test(it.url)).slice(0, maxDetail);
+  await Promise.all(need.map(async (it) => {
+    const code = (it.url.split("/").pop() || "").split("?")[0];
+    if (!/^[a-f0-9]{16,}$/i.test(code)) return;
+    for (const host of ["https://www.binance.info", "https://www.binance.com"]) {
+      try {
+        const raw = await fetchText(`${host}/bapi/composite/v1/public/cms/article/detail/query?articleCode=${code}`, { Accept: "application/json", lang: "zh-CN" }, 3500);
+        const d = JSON.parse(raw) as { data?: CmsArt };
+        const pub = cmsArticleTime(d.data || {});
+        if (pub) { it.t = pub; it.pubOk = true; return; }
+      } catch { /* 换下一个域名 */ }
+    }
+  }));
+  return items;
+}
+
 export async function collectNews(opts: { compact?: boolean } = {}): Promise<NewsItem[]> {
   const tasks: Promise<NewsItem[]>[] = [
     soft(async () => {
@@ -100,7 +166,8 @@ export async function collectNews(opts: { compact?: boolean } = {}): Promise<New
         const title = String(r.title || r.content_short || "").trim();
         const url = String(r.uri || r.source_uri || "").trim();
         const t = Number(r.display_time || 0);
-        if (title && url) out.push({ title, url: cleanUrl(url), source: "华尔街见闻", t: t > 1e12 ? t : t * 1000 || Date.now(), important: isImportantHeadline(title, "华尔街见闻") });
+        const pub = parseSourceTime(t);
+        if (title && url) out.push({ title, url: cleanUrl(url), source: "华尔街见闻", t: pub, pubOk: pub > 0, important: isImportantHeadline(title, "华尔街见闻") });
       }
       return out.slice(0, 8);
     }),
@@ -118,14 +185,15 @@ export async function collectNews(opts: { compact?: boolean } = {}): Promise<New
         await Promise.all(paths.map(async (path) => {
           try {
             const raw = await fetchText(host + path, { Accept: "application/json", lang: "zh-CN" }, 3500);
-            const d = JSON.parse(raw) as { data?: { articles?: { title?: string; code?: string; releaseDate?: number }[]; catalogs?: { articles?: { title?: string; code?: string; releaseDate?: number }[] }[] } };
+            const d = JSON.parse(raw) as { data?: { articles?: CmsArt[]; catalogs?: { articles?: CmsArt[] }[] } };
             const arts = d.data?.articles || (d.data?.catalogs || []).flatMap((c) => c.articles || []);
             for (const a of arts) {
               const title = String(a.title || "").trim();
               const code = String(a.code || "").trim();
               if (!title) continue;
               const link = code ? `https://www.binance.com/zh-CN/support/announcement/${code}` : "https://www.binance.com/zh-CN/support/announcement";
-              out.push({ title, url: cleanUrl(link), source: "币安公告", t: Number(a.releaseDate) || Date.now(), important: true });
+              const pub = cmsArticleTime(a);
+              out.push({ title, url: cleanUrl(link), source: "币安公告", t: pub, pubOk: pub > 0, important: true });
             }
           } catch { /* skip this host/path */ }
         }));
@@ -137,7 +205,7 @@ export async function collectNews(opts: { compact?: boolean } = {}): Promise<New
         seen.add(it.title);
         uniq.push(it);
       }
-      return uniq.slice(0, 12);
+      return fillBinancePublishDates(uniq.slice(0, 12), opts.compact ? 6 : 8);
     }),
     soft(async () => parseRss(await fetchText("https://www.coindesk.com/arc/outboundfeeds/rss/"), "CoinDesk").slice(0, 8)),
     soft(async () => parseRss(await fetchText("https://cointelegraph.com/rss"), "Cointelegraph").slice(0, 8)),
@@ -152,8 +220,7 @@ export async function collectNews(opts: { compact?: boolean } = {}): Promise<New
       soft(async () => parseRss(await fetchText("https://rss.panewslab.com/zh/news/rss"), "PANews").slice(0, 8)),
     );
   }
-  // 精简模式跳过现场拉取币安 CMS（Cloudflare IP 常被拦；由 monitor.py 写入 KV 缓存）
-  if (opts.compact) tasks.splice(1, 1);
+  // 精简模式仍拉币安列表+少量详情以取得 publishDate；中文 RSS 仍跳过。
   const buckets: NewsItem[][] = await Promise.all(tasks);
 
   const all = buckets.flat();

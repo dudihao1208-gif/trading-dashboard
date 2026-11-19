@@ -1,4 +1,4 @@
-import { collectNews, type NewsItem } from "./news";
+import { collectNews, cleanUrl, isReliablePublishTime, parseSourceTime, type NewsItem } from "./news";
 import { translateNews, formatNewsTelegram } from "./translate";
 import { evaluateNews, storyKey } from "./score";
 import type { Env } from "./index";
@@ -348,18 +348,26 @@ ${dash}?tab=chart&symbol=${sym}`
 
     const newsRoom = Math.max(0, Math.min(MAX_NEWS, MAX_TOTAL - msgs.length));
     if (newsRoom > 0) {
-      const ev = await evaluateNews(env, news, 24);
+      const ev = await evaluateNews(env, news, 2);
       const picked = ev.newPassed.slice(0, newsRoom + 3); // 预留冷却后仍够用
       let translated: NewsItem[] = picked;
       try { translated = await translateNews(env, picked); } catch { /* 用原文 */ }
       const byUrl = new Map(translated.map((it) => [(it.url || "").split("?")[0], it]));
+      const PUSH_TTL_MIN = 30 * 24 * 60; // 已推过的事件不再推
       for (const it of ev.newPassed) {
         if (msgs.filter((m) => m.startsWith("📰")).length >= newsRoom) break;
-        const key = "news:" + (storyKey(it.titleZh || it.title) || (it.url || "").split("?")[0] || it.title).slice(0, 180);
-        if (cooled(state, key, 24 * 60)) continue;
+        const urlNorm = cleanUrl(it.url || "").split("?")[0].replace(/\/$/, "").slice(0, 200);
+        const story = storyKey(it.titleZh || it.title) || storyKey(it.title);
+        const urlKey = "news:url:" + urlNorm;
+        const storyKeyId = story ? "news:story:" + story.slice(0, 180) : "";
+        const already = [urlKey, "news:" + urlNorm, storyKeyId, story ? "news:" + story : ""].filter(Boolean)
+          .some((k) => cooled(state, k, PUSH_TTL_MIN));
+        if (already) continue;
+        if (!isReliablePublishTime(it.t) || Date.now() - parseSourceTime(it.t) > 2 * 3600_000) continue;
         const zh = byUrl.get((it.url || "").split("?")[0]) || it;
         msgs.push(formatNewsTelegram({ ...it, ...zh }));
-        mark(state, key);
+        mark(state, urlKey);
+        if (storyKeyId) mark(state, storyKeyId);
       }
     }
 
@@ -404,8 +412,13 @@ export async function readAllNewsCaches(env: Env): Promise<NewsItem[]> {
   for (const k of list.keys) {
     try {
       const raw = await env.STATE.get(k.name);
-      const d = raw ? JSON.parse(raw) as { items?: NewsItem[] } : {};
-      out.push(...(d.items || []));
+      const d = raw ? JSON.parse(raw) as { items?: NewsItem[]; generated_at?: string } : {};
+      const gen = d.generated_at ? Date.parse(d.generated_at) : 0;
+      for (const it of d.items || []) {
+        const t = parseSourceTime(it.t);
+        const ok = !!it.pubOk && isReliablePublishTime(t, Date.now(), gen || undefined);
+        out.push({ ...it, t: ok ? t : 0, pubOk: ok });
+      }
     } catch { /* skip */ }
   }
   return out;

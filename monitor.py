@@ -638,28 +638,46 @@ def local_score_news(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out
 
 
-def extract_published_at(title: str, t: float = 0, source: str = "") -> float:
-    m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", title or "") or re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})", title or "")
-    from_title = 0.0
-    if m:
-        try:
-            from datetime import datetime, timezone
-            from_title = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 12, 0, tzinfo=timezone.utc).timestamp() * 1000
-        except Exception:
-            from_title = 0.0
-    raw = float(t or 0)
-    if raw and raw < 1e12:
-        raw *= 1000
-    if "币安" in (source or "") and not from_title:
+def parse_source_time(raw, now_ms: Optional[float] = None) -> float:
+    """只解析来源原始发布时间，绝不回退到抓取时刻。返回毫秒时间戳，不可靠则为 0。"""
+    if raw in (None, ""):
         return 0.0
-    if from_title and (not raw or raw - from_title > 36 * 3600 * 1000):
-        return from_title
-    if from_title:
-        return from_title
-    return raw or 0.0
+    now = (now_ms if now_ms is not None else now_ts() * 1000)
+    try:
+        if isinstance(raw, (int, float)) or (isinstance(raw, str) and re.fullmatch(r"\d+(?:\.\d+)?", str(raw).strip())):
+            ms = float(raw)
+            if ms < 1e12:
+                ms *= 1000
+        else:
+            from email.utils import parsedate_to_datetime
+            s = str(raw).strip()
+            try:
+                dt = parsedate_to_datetime(s)
+            except Exception:
+                dt = None
+            if dt is None:
+                # ISO 8601
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                except Exception:
+                    return 0.0
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ms = dt.timestamp() * 1000
+        if ms < 1e12 or ms > now + 5 * 60 * 1000:
+            return 0.0
+        return ms
+    except Exception:
+        return 0.0
 
 
-def filter_news_for_push(items: List[Dict[str, Any]], hours: float = 24) -> List[Dict[str, Any]]:
+def extract_published_at(title: str, t: float = 0, source: str = "") -> float:
+    # 标题里的业务日期不是发布时间；无来源时间戳则不推。
+    _ = (title, source)
+    return parse_source_time(t)
+
+
+def filter_news_for_push(items: List[Dict[str, Any]], hours: float = 2) -> List[Dict[str, Any]]:
     cutoff = now_ts() * 1000 - hours * 3600 * 1000
     windowed = []
     for it in items:
@@ -671,7 +689,7 @@ def filter_news_for_push(items: List[Dict[str, Any]], hours: float = 24) -> List
             ts = extract_published_at(title, float(it.get("t") or 0), str(it.get("source") or ""))
         except (TypeError, ValueError):
             ts = extract_published_at(title, 0, str(it.get("source") or ""))
-        if ts and ts < cutoff:
+        if not ts or ts < cutoff:
             continue
         windowed.append(it)
 
@@ -760,11 +778,8 @@ def fetch_binance_announcements() -> List[Dict[str, Any]]:
                 if not title:
                     continue
                 url = f"https://www.binance.com/zh-CN/support/announcement/{code}" if code else "https://www.binance.com/zh-CN/support/announcement"
-                try:
-                    ts = float(a.get("releaseDate") or 0)
-                except (TypeError, ValueError):
-                    ts = 0
-                items.append({"title": title, "url": url, "source": "币安公告", "t": ts or 0, "important": True})
+                ts = parse_source_time(a.get("publishDate") or a.get("releaseDate") or a.get("firstOpenDate") or 0)
+                items.append({"title": title, "url": url, "source": "币安公告", "t": ts, "pubOk": bool(ts), "important": True, "code": code})
                 got += 1
         if got:
             break
@@ -776,6 +791,21 @@ def fetch_binance_announcements() -> List[Dict[str, Any]]:
             continue
         seen.add(it["title"])
         uniq.append(it)
+    need = [it for it in uniq if not it.get("pubOk") and it.get("code")][:8]
+    for it in need:
+        code = it.get("code")
+        for host in hosts:
+            data = _raw_get(f"{host}/bapi/composite/v1/public/cms/article/detail/query?articleCode={code}", 8)
+            if isinstance(data, dict):
+                ts = parse_source_time(((data.get("data") or {}) if isinstance(data.get("data"), dict) else {}).get("publishDate")
+                    or ((data.get("data") or {}) if isinstance(data.get("data"), dict) else {}).get("releaseDate")
+                    or 0)
+                if ts:
+                    it["t"] = ts
+                    it["pubOk"] = True
+                    break
+    for it in uniq:
+        it.pop("code", None)
     return uniq[:12]
 
 
@@ -956,16 +986,17 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
     news_room = max(0, min(2, max_total - len(msgs)))
     if news_room:
         news_cd = float(rd.get("news_cooldown_hours") or 24) * 60
-        for it in filter_news_for_push(fetch_news_items(), hours=24):
+        for it in filter_news_for_push(fetch_news_items(), hours=2):
             if news_room <= 0:
                 break
             title = str(it.get("title") or "").strip()
             url = str(it.get("url") or "").strip()
             if not title or not url:
                 continue
-            sk = story_key(str(it.get("titleZh") or title)) or url.split("?")[0]
-            key = "news:" + sk[:180]
-            if cooled(state, key, news_cd):
+            url_key = "news:url:" + (clean_news_url(url).split("?")[0].rstrip("/")[:200])
+            sk = story_key(str(it.get("titleZh") or title)) or story_key(title)
+            story_id = ("news:story:" + sk[:180]) if sk else ""
+            if any(cooled(state, k, 30 * 24 * 60) for k in (url_key, "news:" + url_key[len("news:url:"):], story_id, ("news:" + sk[:180] if sk else "")) if k):
                 continue
             src = it.get("source") or "资讯"
             zh_title = str(it.get("titleZh") or title).strip()
@@ -974,9 +1005,14 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
             piece = f"📰 {zh_title}"
             if why:
                 piece += f"\n为何影响价格：{why}"
+            pub = parse_source_time(it.get("t") or 0)
+            if pub:
+                piece += f"\n发布时间：{fmt_local(pub / 1000 if pub > 1e12 else pub)}"
             piece += f"\n来源：{src}\n{link}"
             msgs.append(piece)
-            mark(state, key)
+            mark(state, url_key)
+            if story_id:
+                mark(state, story_id)
             news_room -= 1
     return msgs
 
