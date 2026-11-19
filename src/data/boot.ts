@@ -51,7 +51,12 @@ export async function boot() {
   futCtl = startFutSocket();
   ensureBook();
   refreshMacro();
-  refreshFunding();
+  // 先给币安期货推送约 10 秒机会；只有还没有币安资金费时才用 OKX 填热力图，避免一启动就被标成 OKX。
+  setTimeout(() => {
+    const funding = getState().funding;
+    const hasBn = Object.values(funding).some((f) => (f.source || "").includes("币安") && Date.now() - f.t < 120_000);
+    if (!hasBn) refreshFunding();
+  }, 10_000);
   refreshCalendar();
   refreshNews();
   refreshStocks();

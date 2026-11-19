@@ -1,4 +1,4 @@
-import { getState, patch, upsertTicker, setStamp, SPOT_WS, FUT_WS, MAJORS, LEV_RE, type LinkState } from "./store";
+import { getState, patch, upsertTicker, setStamp, SPOT_WS, MAJORS, LEV_RE, type LinkState } from "./store";
 import { refreshFunding, fetchDepth } from "./api";
 
 /** 合并流必须是 /stream?streams=a/b，不能接在 /ws 后面。 */
@@ -141,24 +141,49 @@ function applyBinanceMarks(rows: Record<string, unknown>[]) {
   setStamp("heat", `币安 · ${Object.keys(funding).filter((k) => k.endsWith("USDT")).length} 个永续`);
 }
 
+export const FUT_COMBINED = "wss://fstream.binance.com/stream?streams=!markPrice@arr@1s/!forceOrder@arr";
+export const FUT_SINGLE = "wss://fstream.binance.com/ws/!markPrice@arr@1s";
+const FUT_URLS = [FUT_COMBINED, FUT_SINGLE];
+
 export function startFutSocket(): SockCtl {
-  // 全市场资金费 + 爆仓 + 主要交易对单币流（意大利等非限制地区可直连）
-  const streams = [
-    "!markPrice@arr@1s",
-    "!forceOrder@arr",
-    ...MAJORS.map((s) => s.toLowerCase() + "@markPrice@1s"),
-  ].join("/");
-  return connectWithTimeout(
-    FUT_WS,
-    (base) => base + streams,
-    {
-      name: "fut",
-      waitMs: 4000,
-      silentMs: 25000,
-      labels: { live: "币安", down: "期货不可用", wait: "期货连接…" },
-      onMsg(payload) {
-        const msg = payload as { stream?: string; data?: unknown };
-        const data = (msg.data !== undefined ? msg.data : payload) as unknown;
+  // 只订全市场标记价 + 爆仓。不要再叠单币 markPrice：合并流更长，手机上首包更慢。
+  // 首包超时从连接开始算 10 秒（含 TLS）。失败后改用 OKX，但后台继续重试币安，连上即切回。
+  let dead = false, sock: WebSocket | null = null, idx = 0, timer: number | null = null, fallbackDone = false;
+
+  const arm = (ms: number, fn: () => void) => {
+    if (timer) clearTimeout(timer);
+    timer = window.setTimeout(fn, ms);
+  };
+
+  const open = () => {
+    if (dead) return;
+    const url = FUT_URLS[idx % FUT_URLS.length];
+    const cur = getState().fut;
+    // 已经降级或已连通时，后台重试不要闪回「连接中」
+    if (cur.state !== "down" && cur.state !== "live") {
+      patch({ fut: { state: "wait", label: "期货连接…", detail: url.replace(/^wss:\/\//, "") } });
+    }
+    try {
+      sock = new WebSocket(url);
+    } catch {
+      idx += 1;
+      arm(2500, open);
+      return;
+    }
+    let got = 0;
+    arm(10_000, () => {
+      if (dead || got > 0) return;
+      try { sock?.close(4000, "first-message-timeout"); } catch { /* */ }
+    });
+    sock.onmessage = (ev) => {
+      got += 1;
+      if (got === 1) {
+        patch({ fut: { state: "live", label: "币安", detail: url.replace(/^wss:\/\//, "") } });
+      }
+      arm(30_000, () => { try { sock?.close(); } catch { /* */ } });
+      try {
+        const payload = JSON.parse(ev.data) as { stream?: string; data?: unknown };
+        const data = (payload.data !== undefined ? payload.data : payload) as unknown;
         if (Array.isArray(data)) {
           applyBinanceMarks(data as Record<string, unknown>[]);
           return;
@@ -172,15 +197,32 @@ export function startFutSocket(): SockCtl {
         } else if (d.e === "markPriceUpdate" || (d.r != null && d.s)) {
           applyBinanceMarks([d]);
         }
-      },
-      onDown() {
-        const heat = getState().stamps.heat?.text || "";
-        if (!heat.startsWith("币安")) {
+      } catch { /* */ }
+    };
+    sock.onerror = () => { /* 等 onclose */ };
+    sock.onclose = () => {
+      if (dead) return;
+      if (got === 0) idx += 1;
+      if (got === 0 && !fallbackDone) {
+        fallbackDone = true;
+        const fut = getState().fut;
+        if (fut.state !== "live") {
+          patch({ fut: { state: "down", label: "期货暂用备用", detail: "币安推送暂无数据，已改用 OKX，后台继续重试币安" } });
           refreshFunding().catch(() => {});
         }
-      },
-    }
-  );
+      }
+      // 后台一直重试币安；已连通过则稍快重连，否则 3 秒换一条线路
+      arm(got > 0 ? 2000 : 3000, open);
+    };
+  };
+  open();
+  return {
+    close() {
+      dead = true;
+      if (timer) clearTimeout(timer);
+      try { sock?.close(); } catch { /* */ }
+    },
+  };
 }
 
 export function startDepthSocket(symbol: string, onTrade?: (t: { t: number; p: number; q: number; m: boolean }) => void): SockCtl {

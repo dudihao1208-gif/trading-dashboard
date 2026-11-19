@@ -49,7 +49,7 @@ export default function Deriv() {
           <h2>资金费率热力图</h2>
           <span className={"stamp" + (st.stamps.heat?.err ? " err" : "")}>{st.stamps.heat?.text || "—"}</span>
         </div>
-        <p className="hint">优先直连币安全市场资金费；若几秒内不可用则自动改用 OKX。下一次普遍结算倒计时 {fmtCountdown((entries[0]?.[1].next || nextFundingTime()) - now)}（本地时区）。颜色越深表示费率绝对值越大，点击打开图表。</p>
+        <p className="hint">优先直连币安全市场资金费（约 10 秒内等首包）；若仍不可用则先显示 OKX，同时后台继续重试币安，连上即切回。下一次普遍结算倒计时 {fmtCountdown((entries[0]?.[1].next || nextFundingTime()) - now)}（本地时区）。颜色越深表示费率绝对值越大，点击打开图表。</p>
         <div className="heat">
           {entries.map(([sym, f]) => {
             const a = Math.min(1, Math.abs(f.rate) / maxAbs);
@@ -82,7 +82,7 @@ export default function Deriv() {
       <div className="card">
         <div className="card-h"><h2>爆仓流水</h2><span className={"stamp" + (st.fut.state === "down" ? " err" : "")}>{st.fut.label}</span></div>
         {st.fut.state !== "live" && (
-          <p className="hint">正在优先连接币安期货推送（全市场资金费与爆仓）。若几秒内没有数据（部分地区会被限制），自动改用 OKX，状态不会一直停在「连接中」。</p>
+          <p className="hint">正在连接币安期货推送。若约 10 秒内没有数据，先改用 OKX 显示资金费，并在后台继续重试币安。可到「我的 → 诊断」查看本机到各接口的连通结果。</p>
         )}
         <div className="table-wrap">
           <table className="data">

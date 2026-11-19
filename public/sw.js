@@ -1,4 +1,4 @@
-const CACHE = "obs-shell-v3";
+const CACHE = "obs-shell-v4";
 const PRECACHE = [
   "./",
   "./index.html",

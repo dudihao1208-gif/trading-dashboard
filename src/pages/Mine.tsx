@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ConnDiag from "../components/ConnDiag";
 import { useStore } from "../lib/useStore";
 import { fmtDateTime, fmtPct, fmtPrice, chgClass, ageStamp } from "../lib/format";
 import { getState, patch, saveLS, toast, type AlertRule } from "../data/store";
@@ -7,17 +8,18 @@ import { probeWorker, refreshNews } from "../data/api";
 
 export default function Mine() {
   const st = useStore();
-  const [sub, setSub] = useState<"alert" | "stocks" | "news" | "set">("alert");
+  const [sub, setSub] = useState<"alert" | "stocks" | "news" | "diag" | "set">("alert");
   return (
     <div className="phone-pad">
-      <div className="seg" style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        {([["alert", "预警"], ["stocks", "美股代币"], ["news", "资讯日历"], ["set", "设置"]] as const).map(([k, l]) => (
+      <div className="seg" style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+        {([["alert", "预警"], ["stocks", "美股代币"], ["news", "资讯日历"], ["diag", "诊断"], ["set", "设置"]] as const).map(([k, l]) => (
           <button key={k} className={sub === k ? "on btn" : "btn"} onClick={() => setSub(k)}>{l}</button>
         ))}
       </div>
       {sub === "alert" && <AlertWizard />}
       {sub === "stocks" && <Stocks />}
       {sub === "news" && <NewsCal />}
+      {sub === "diag" && <ConnDiag />}
       {sub === "set" && <Settings />}
       <p className="disclaimer">本站仅供观察，不构成投资建议，不自动交易。</p>
     </div>
