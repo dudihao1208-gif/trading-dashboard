@@ -204,16 +204,64 @@ export function underlyingOf(xsym: string): string | null {
   return null;
 }
 
-export async function refreshStocks() {
-  let equities: Record<string, { price: number; change_percent: number | null; name?: string; daily_closes?: { t: number; c: number }[] }> = {};
-  let eqAt = "";
+type EquityQuote = { price: number; change_percent: number | null; name?: string; daily_closes?: { t: number; c: number }[] };
+
+async function yahooViaWorker(sym: string): Promise<EquityQuote | null> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
   try {
-    const eq = await getJSON<{ generated_at?: string; quotes?: Record<string, { price: number; change_percent: number | null; name?: string; daily_closes?: { t: number; c: number }[] }> }>("public-data/equities.json", 8000);
+    const data = await getJSON<{
+      chart?: { result?: Array<{
+        meta?: { regularMarketPrice?: number; chartPreviousClose?: number; previousClose?: number; shortName?: string; longName?: string };
+        timestamp?: number[];
+        indicators?: { quote?: Array<{ close?: (number | null)[] }> };
+      }> };
+    }>(via(url), 10000, false);
+    const result = data.chart?.result?.[0];
+    if (!result) return null;
+    const meta = result.meta || {};
+    const closes = result.indicators?.quote?.[0]?.close || [];
+    const ts = result.timestamp || [];
+    const valid = closes.filter((c): c is number => c != null);
+    let last = meta.regularMarketPrice;
+    const prev = meta.chartPreviousClose || meta.previousClose;
+    let change_percent: number | null = null;
+    if (last != null && prev) change_percent = (last / prev - 1) * 100;
+    else if (valid.length >= 2) {
+      change_percent = (valid[valid.length - 1] / valid[valid.length - 2] - 1) * 100;
+      last = last ?? valid[valid.length - 1];
+    }
+    if (last == null) return null;
+    return {
+      price: last,
+      change_percent,
+      name: meta.shortName || meta.longName || sym,
+      daily_closes: ts.map((t, i) => ({ t, c: closes[i] as number })).filter((x) => x.c != null).slice(-30),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function refreshStocks() {
+  let equities: Record<string, EquityQuote> = {};
+  let eqAt = "";
+  let eqSrc = "";
+  try {
+    const eq = await getJSON<{ generated_at?: string; quotes?: Record<string, EquityQuote> }>("public-data/equities.json", 8000);
     equities = eq.quotes || {};
     eqAt = eq.generated_at || "";
+    if (Object.keys(equities).length) eqSrc = "public-data";
   } catch { /* 无文件 */ }
   try {
     const list = await getJSON<Array<{ id: string; symbol: string; name: string; current_price: number; price_change_percentage_24h: number }>>(CG_XSTOCKS, 12000);
+    const need = Array.from(new Set((list || []).map((c) => underlyingOf(c.symbol)).filter((u): u is string => !!u && !equities[u]?.price)));
+    if (workerOn() && need.length) {
+      await mapPool(need.slice(0, 16), 4, async (sym) => {
+        const q = await yahooViaWorker(sym);
+        if (q) equities[sym] = q;
+      });
+      if (need.some((s) => equities[s]?.price)) eqSrc = eqSrc ? eqSrc + " · Yahoo/Worker" : "Yahoo · Worker";
+    }
     const xstocks: XStock[] = (list || []).map((c) => {
       const u = underlyingOf(c.symbol);
       const eq = u ? equities[u] : undefined;
@@ -221,12 +269,12 @@ export async function refreshStocks() {
       if (eq?.price && c.current_price) premium = (c.current_price / eq.price - 1) * 100;
       return {
         id: c.id, symbol: (c.symbol || "").toUpperCase(), name: c.name, price: c.current_price, chg: c.price_change_percentage_24h,
-        under: eq ? { symbol: u!, price: eq.price, chg: eq.change_percent, name: eq.name } : u ? { symbol: u, price: 0, chg: null } : undefined,
+        under: eq?.price ? { symbol: u!, price: eq.price, chg: eq.change_percent, name: eq.name } : u ? { symbol: u, price: 0, chg: null } : undefined,
         premium, corr: null, noUnder: u === null,
       };
     });
     patch({ xstocks });
-    setStamp("stocks", "CoinGecko" + (eqAt ? " · 正股已同步" : " · 正股待 Actions 刷新"));
+    setStamp("stocks", "CoinGecko" + (eqSrc ? " · 正股 " + eqSrc : " · 正股待刷新"));
   } catch {
     setStamp("stocks", "代币列表加载失败", true);
   }
@@ -235,12 +283,25 @@ export async function refreshStocks() {
 export async function refreshCalendar() {
   try {
     const data = await getJSON<{ generated_at?: string; events?: AppCal[] }>("public-data/calendar.json", 8000);
-    patch({ calendar: data.events || [], calendarAt: data.generated_at || "" });
-    setStamp("cal", data.generated_at ? "已同步宏观日历" : "日历尚未生成", !data.generated_at);
-  } catch {
-    patch({ calendar: [], calendarAt: "" });
-    setStamp("cal", "日历文件不可用", true);
+    if (data.events?.length) {
+      patch({ calendar: data.events, calendarAt: data.generated_at || "" });
+      setStamp("cal", data.generated_at ? "已同步宏观日历" : "日历已加载");
+      return;
+    }
+  } catch { /* 再试 Worker */ }
+  if (workerOn()) {
+    try {
+      const evs = await getJSON<AppCal[]>(via("https://nfs.faireconomy.media/ff_calendar_thisweek.json"), 12000, false);
+      const events = Array.isArray(evs) ? evs : [];
+      if (events.length) {
+        patch({ calendar: events, calendarAt: new Date().toISOString() });
+        setStamp("cal", "宏观日历 · Worker");
+        return;
+      }
+    } catch { /* fall through */ }
   }
+  patch({ calendar: [], calendarAt: "" });
+  setStamp("cal", workerOn() ? "日历暂不可用" : "日历文件不可用", true);
 }
 
 type AppCal = { title: string; country: string; date: string; impact: string; forecast: string; previous: string };

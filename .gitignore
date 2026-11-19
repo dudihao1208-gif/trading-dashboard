@@ -7,6 +7,7 @@ __pycache__/
 .monitor-state.json
 .env
 .env.*
+!.env.production
 *.local
 .DS_Store
 Thumbs.db

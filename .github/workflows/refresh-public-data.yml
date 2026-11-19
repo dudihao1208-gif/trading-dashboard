@@ -25,6 +25,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Refresh public data
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
         run: python monitor.py --write-public --config config.json
 
       - name: Commit if changed

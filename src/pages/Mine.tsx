@@ -185,7 +185,7 @@ function Settings() {
   return (
     <div className="card">
       <div className="card-h"><h2>数据代理（可选）</h2></div>
-      <p className="hint">填写已部署的 Cloudflare Worker 根地址后，可解锁持仓量历史、多空比、主动买卖和中文资讯。未填写时站点仍可使用现货、盘口、K 线和资金费热力。</p>
+      <p className="hint">默认已接入本站的 Cloudflare Worker（持仓量历史、多空比、主动买卖、全市场资金费、正股报价、宏观日历和中文资讯）。一般不用改；如需换地址或清空降级，可在此覆盖。</p>
       <div style={{ display: "flex", gap: 8 }}>
         <input className="inp" style={{ flex: 1 }} placeholder="https://xxx.workers.dev" value={url} onChange={(e) => setUrl(e.target.value)} />
         <button className="btn primary" onClick={async () => {
@@ -195,7 +195,7 @@ function Settings() {
         }}>保存</button>
       </div>
       <p className="hint" style={{ marginTop: 8 }}>
-        状态：{st.workerUrl ? (st.workerOk === true ? "已连接" : st.workerOk === false ? "不可用" : "未检测") : "未配置（降级模式）"}
+        状态：{st.workerUrl ? (st.workerOk === true ? "已连接（默认代理）" : st.workerOk === false ? "不可用" : "未检测") : "未配置（降级模式）"}
       </p>
     </div>
   );

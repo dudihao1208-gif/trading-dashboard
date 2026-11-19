@@ -17,6 +17,7 @@ export default function Deriv() {
   const [tkNote, setTkNote] = useState("加载中…");
   const oiRef = useRef<HTMLDivElement>(null);
   const lsRef = useRef<HTMLDivElement>(null);
+  const tkRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
 
   const entries = Object.entries(st.funding)
@@ -36,6 +37,7 @@ export default function Deriv() {
       setTkNote(tk.ok ? tk.note : tk.note);
       drawArea(oiRef.current, oi.ok ? oi.pts.map((p) => ({ time: Math.floor(p.t / 1000), value: p.a })) : [], "#f0b90b");
       drawArea(lsRef.current, ls.ok ? ls.pts.map((p) => ({ time: Math.floor(p.t / 1000), value: p.a })) : [], "#60a5fa");
+      drawArea(tkRef.current, tk.ok ? tk.pts.map((p) => ({ time: Math.floor(p.t / 1000), value: p.a })) : [], "#0ecb81");
     })();
     return () => { dead = true; };
   }, [ccy]);
@@ -73,7 +75,8 @@ export default function Deriv() {
         <div ref={oiRef} className="chart-box" style={{ height: 180, minHeight: 180 }} />
         <p className="hint" style={{ marginTop: 10 }}>多空账户比：{lsNote}</p>
         <div ref={lsRef} className="chart-box" style={{ height: 160, minHeight: 160 }} />
-        <p className="hint" style={{ marginTop: 8 }}>主动买卖：{tkNote}</p>
+        <p className="hint" style={{ marginTop: 8 }}>主动买入量：{tkNote}</p>
+        <div ref={tkRef} className="chart-box" style={{ height: 160, minHeight: 160 }} />
       </div>
 
       <div className="card">

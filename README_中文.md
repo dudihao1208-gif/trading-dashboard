@@ -51,24 +51,17 @@ sudo systemctl restart trading-monitor
 
 ---
 
-## Cloudflare Worker（可选，请自行部署）
+## Cloudflare Worker（已默认接入）
 
-未配置 Worker 时，观察台仍可用：现货实时行情、K 线（均线/MACD/成交量）、盘口与成交、资金费热力图、机会雷达（部分信号）、美股对比、宏观日历。
+线上站点已默认使用：
 
-配置后可解锁：持仓量历史、多空比、主动买卖趋势、中文资讯。
+`https://trading-dashboard-proxy.2770818829.workers.dev`
 
-仓库里已有 `worker/src/index.ts` 与 `wrangler.toml`。本项目**不会**代你创建 Cloudflare 账号或执行发布。你自己可以：
+CORS 仅允许 `https://dudihao1208-gif.github.io`。一般不用改地址；若要换代理或清空降级，可在「我的 → 设置」覆盖。
 
-```bash
-npm i -g wrangler
-wrangler login
-cd trading-dashboard
-wrangler deploy
-```
+默认解锁：持仓量历史、多空比、主动买入量、中文资讯、正股 Yahoo 报价（public-data 缺失时）。宏观日历优先读仓库 `public-data`，必要时再走 Worker。资金费热力图仍以 OKX（及 CoinGecko 补足）为主——币安期货接口从 Worker 所在网络常被拦截。
 
-把得到的 `https://xxxx.workers.dev` 填进观察台「我的 → 设置」，或在 Pages 的 Actions 里加构建变量 `VITE_WORKER_URL`（不是 Telegram Secret）。
-
-Worker 只代理白名单里的公开只读接口，不是开放代理。
+Worker 只代理白名单里的公开只读接口，不是开放代理。源码在 `worker/src/index.ts`。监控脚本可通过非密钥环境变量或配置项 `WORKER_URL` / `worker_url` 在直连失败时走同一代理。
 
 ---
 
@@ -99,5 +92,5 @@ python monitor.py --test-ping   # 只发一条标明测试的连通消息
 - `src/`：观察台前端（Vite + React + TypeScript）
 - `monitor.py`：监控与雷达
 - `config.json` / `config.example.json`：阈值（无密钥）
-- `worker/` + `wrangler.toml`：可选代理
+- `worker/` + `wrangler.toml`：已部署的只读代理
 - `.github/workflows/`：Pages 构建、Monitor、刷新 public-data、Keepalive（防止 60 天停跑）

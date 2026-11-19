@@ -121,7 +121,7 @@ let state: AppState = {
   tab: "market",
   phone: typeof window !== "undefined" ? window.innerWidth < 960 : true,
   multi: false,
-  workerUrl: (ls.workerUrl || import.meta.env.VITE_WORKER_URL || "").replace(/\/$/, ""),
+  workerUrl: (typeof ls.workerUrl === "string" ? ls.workerUrl : (import.meta.env.VITE_WORKER_URL || "")).replace(/\/$/, ""),
   workerOk: null,
   spot: { state: "idle", label: "现货未连接", detail: "" },
   fut: { state: "idle", label: "期货未连接", detail: "" },
@@ -170,11 +170,14 @@ export function workerOn(): boolean {
   return !!state.workerUrl;
 }
 
-/** 经 Worker 代理；未配置则直连 */
+/** 经 Worker 代理；以 / 开头的路径（如 /news/zh）走 Worker 自身路由，其余走白名单代理。 */
 export function via(url: string): string {
   const w = state.workerUrl;
   if (!w) return url;
-  return w.replace(/\/$/, "") + "/proxy?url=" + encodeURIComponent(url);
+  const root = w.replace(/\/$/, "");
+  if (url.startsWith("/")) return root + url;
+  if (url.startsWith(root)) return url;
+  return root + "/proxy?url=" + encodeURIComponent(url);
 }
 
 export async function getJSON<T = unknown>(url: string, timeout = 12000, useWorker = false): Promise<T> {

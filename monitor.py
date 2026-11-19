@@ -5,6 +5,7 @@
 机会雷达会把放量、极端资金费、持仓量骤升、恐慌贪婪极端、代币溢价、
 自选大波动推到 Telegram。所有提醒带冷却与去重。不是投资建议，不下单。
 密钥只用环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，不要写进仓库。
+Worker 地址用环境变量 WORKER_URL 或 config 里的 worker_url（不是密钥）。
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -38,6 +40,8 @@ XSPECIAL = {"SPCX": None, "STRCX": None, "CRCLX": "CRCL", "SNDKX": "SNDK", "SPYX
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "trading-dashboard-monitor/2.0", "Accept": "application/json"})
+
+WORKER_URL = ""
 
 
 def now_ts() -> float:
@@ -74,7 +78,22 @@ def save_json(path: Path, data: Any) -> None:
     tmp.replace(path)
 
 
-def http_get(url: str, timeout: int = 15) -> Optional[Any]:
+def resolve_worker_url(cfg: Optional[Dict[str, Any]] = None) -> str:
+    raw = os.environ.get("WORKER_URL") or (cfg or {}).get("worker_url") or ""
+    return str(raw).strip().rstrip("/")
+
+
+def via_worker(url: str) -> Optional[str]:
+    if not WORKER_URL:
+        return None
+    if url.startswith(WORKER_URL):
+        return url
+    if url.startswith("/"):
+        return WORKER_URL + url
+    return WORKER_URL + "/proxy?url=" + quote(url, safe="")
+
+
+def _raw_get(url: str, timeout: int) -> Optional[Any]:
     try:
         r = SESSION.get(url, timeout=timeout)
         if r.status_code == 451:
@@ -86,6 +105,17 @@ def http_get(url: str, timeout: int = 15) -> Optional[Any]:
     except Exception as e:
         log(f"GET 失败 {url.split('?')[0]} ：{type(e).__name__}")
         return None
+
+
+def http_get(url: str, timeout: int = 15) -> Optional[Any]:
+    data = _raw_get(url, timeout)
+    need = data is None or (isinstance(data, dict) and data.get("__error") == 451)
+    if need:
+        proxied = via_worker(url)
+        if proxied and proxied != url:
+            log(f"改走 Worker 代理 {url.split('?')[0]}")
+            data = _raw_get(proxied, timeout)
+    return data
 
 
 def spot_get(path: str) -> Optional[Any]:
@@ -128,6 +158,10 @@ def load_config(path: Path) -> Dict[str, Any]:
     cfg.setdefault("calendar_impact", ["High"])
     cfg.setdefault("dashboard_url", "https://dudihao1208-gif.github.io/trading-dashboard/")
     cfg.setdefault("radar", {})
+    global WORKER_URL
+    WORKER_URL = resolve_worker_url(cfg)
+    if WORKER_URL:
+        log(f"已启用 Worker 代理：{WORKER_URL}")
     return cfg
 
 

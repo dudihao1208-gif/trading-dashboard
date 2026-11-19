@@ -3,6 +3,8 @@
 # 密钥请放在仓库 Settings → Secrets and variables → Actions：
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHAT_ID
+# 非密钥变量（Settings → Secrets and variables → Actions → Variables）：
+#   WORKER_URL   Cloudflare Worker 根地址，供期货/Yahoo/日历失败时走代理
 name: Trading Monitor
 
 on:
@@ -39,6 +41,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
         run: python monitor.py --config config.json --state .monitor-state.json
 
       - name: Save alert state

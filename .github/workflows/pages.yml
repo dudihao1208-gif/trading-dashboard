@@ -27,6 +27,7 @@ jobs:
       - run: npm run build
         env:
           VITE_DASHBOARD_URL: https://dudihao1208-gif.github.io/trading-dashboard/
+          VITE_WORKER_URL: https://trading-dashboard-proxy.2770818829.workers.dev
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
