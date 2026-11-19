@@ -337,3 +337,5 @@ table.data .r { text-align: right; }
 .diag-item { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .diag-item .title { font-weight: 700; margin-bottom: 4px; }
 .diag-item .meta { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+.news-sum { color: var(--muted); font-size: 12px; line-height: 1.45; margin: 4px 0 2px; }

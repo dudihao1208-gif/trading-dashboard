@@ -58,7 +58,7 @@ export type AppState = {
   xstocks: XStock[];
   calendar: { title: string; country: string; date: string; impact: string; forecast: string; previous: string }[];
   calendarAt: string;
-  news: { title: string; url: string; source: string; t: number }[];
+  news: { title: string; url: string; source: string; t: number; titleZh?: string; summaryZh?: string }[];
   newsNote: string;
   book: { bids: BookLevel[]; asks: BookLevel[] };
   bookAt: number;

@@ -3,11 +3,13 @@
  * CORS 仅放行观察台 GitHub Pages 源。
  * 去重状态存在 KV；cron 每 10 分钟跑机会雷达。
  */
-import { collectNews } from "./news";
+import { collectNews, cleanUrl } from "./news";
+import { translateNews } from "./translate";
 import { getCalendar, getEquities, loadMonitorState, readLastRun, runScheduled, saveMonitorState, saveNewsCache, readAllNewsCaches, type LastRun } from "./monitor";
 
 export interface Env {
   STATE: KVNamespace;
+  AI?: { run: (model: string, inputs: Record<string, unknown>) => Promise<unknown> };
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
   MONITOR_SECRET?: string;
@@ -110,9 +112,10 @@ export default {
           seen.add(k);
           items.push(it);
         }
+        const translated = await translateNews(env, items.slice(0, 50));
         const sources: Record<string, number> = {};
-        for (const it of items) sources[it.source] = (sources[it.source] || 0) + 1;
-        return json({ items: items.slice(0, 50), sources, generated_at: new Date().toISOString() }, req);
+        for (const it of translated) sources[it.source] = (sources[it.source] || 0) + 1;
+        return json({ items: translated.map(({ excerpt, ...rest }) => rest), sources, generated_at: new Date().toISOString() }, req);
       } catch {
         return json({ items: [], error: "news failed" }, req, 502);
       }
@@ -123,7 +126,7 @@ export default {
       const body = await req.json() as { source?: string; items?: { title: string; url: string; source?: string; t?: number; important?: boolean }[] };
       if (!body.source || !Array.isArray(body.items)) return json({ error: "bad body" }, req, 400);
       const items = body.items.filter((x) => x.title && x.url).map((x) => ({
-        title: x.title, url: x.url, source: x.source || body.source!, t: x.t || Date.now(), important: x.important !== false,
+        title: x.title, url: cleanUrl(x.url), source: x.source || body.source!, t: x.t || Date.now(), important: x.important !== false,
       }));
       await saveNewsCache(env, body.source, items);
       return json({ ok: true, n: items.length }, req);

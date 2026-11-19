@@ -13,3 +13,6 @@ crons = ["*/10 * * * *"]
 
 # CORS 仅允许 https://dudihao1208-gif.github.io
 # 每 10 分钟 cron 跑机会雷达 + 刷新日历/正股缓存（状态存在 KV）
+
+[ai]
+binding = "AI"

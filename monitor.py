@@ -480,6 +480,22 @@ def is_major_headline(title: str) -> bool:
     return bool(_news_regex().search(t))
 
 
+
+def clean_news_url(url: str) -> str:
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    try:
+        u = urlparse(url)
+        q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True)
+             if not (k.lower().startswith("utm_") or k.lower() in {
+                 "fbclid","gclid","gclsrc","dclid","msclkid","twclid","yclid",
+                 "mc_cid","mc_eid","igshid","si","icid","cmpid","ncid","spm","scm",
+                 "ref","ref_src","_ga","_gl","wbraid","gbraid","ocid","srsltid","mkt_tok",
+             })]
+        return urlunparse((u.scheme, u.netloc, u.path, u.params, urlencode(q), ""))
+    except Exception:
+        return url
+
+
 def news_summary(title: str, max_len: int = 80) -> str:
     s = " ".join((title or "").split())
     if len(s) <= max_len:
@@ -768,7 +784,14 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
         if cooled(state, key, news_cd):
             continue
         src = it.get("source") or "资讯"
-        msgs.append(f"📰 {news_summary(title)}\n来源 {src}\n{url}")
+        zh_title = str(it.get("titleZh") or title).strip()
+        zh_sum = str(it.get("summaryZh") or "").strip()
+        link = clean_news_url(url)
+        piece = f"📰 {zh_title}"
+        if zh_sum and zh_sum != zh_title:
+            piece += "\n" + zh_sum
+        piece += f"\n来源：{src}\n{link}"
+        msgs.append(piece)
         mark(state, key)
         news_n += 1
     return msgs

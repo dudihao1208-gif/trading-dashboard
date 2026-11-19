@@ -172,7 +172,8 @@ function NewsCal() {
         {st.newsNote && <p className="hint">{st.newsNote}</p>}
         {st.news.map((n, i) => (
           <div className="news-item" key={i}>
-            <a href={n.url} target="_blank" rel="noopener">{n.title}</a>
+            <a href={n.url} target="_blank" rel="noopener">{n.titleZh || n.title}</a>
+            {n.summaryZh && n.summaryZh !== (n.titleZh || n.title) && <div className="news-sum">{n.summaryZh}</div>}
             <div className="m">{n.source} · {fmtDateTime(n.t)}</div>
           </div>
         ))}

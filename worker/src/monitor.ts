@@ -1,5 +1,6 @@
 import { underlyingOf, sanePremium } from "./map";
 import { collectNews, isImportantHeadline, type NewsItem } from "./news";
+import { translateNews, formatNewsTelegram } from "./translate";
 import type { Env } from "./index";
 
 const VISION = "https://data-api.binance.vision";
@@ -37,6 +38,7 @@ export type LastRun = {
   skipped?: string;
   error?: string;
   sources?: string[];
+  preview?: string[];
 };
 
 function rome(isoOrNow?: number) {
@@ -188,19 +190,22 @@ function footer() {
 
 export async function runScheduled(env: Env, trigger: string, opts: { dry?: boolean } = {}): Promise<LastRun> {
   const started = Date.now();
-  const lock = await env.STATE.get("lock");
-  if (lock && started - Number(lock) < 90_000) {
-    const run: LastRun = { at: iso(), atRome: rome(), trigger, ok: true, sent: 0, scanned: 0, skipped: "lock" };
-    return run;
+  const dry = !!opts.dry;
+  if (!dry) {
+    const lock = await env.STATE.get("lock");
+    if (lock && started - Number(lock) < 90_000) {
+      const run: LastRun = { at: iso(), atRome: rome(), trigger, ok: true, sent: 0, scanned: 0, skipped: "lock" };
+      return run;
+    }
+    await env.STATE.put("lock", String(started), { expirationTtl: 120 });
   }
-  await env.STATE.put("lock", String(started), { expirationTtl: 120 });
 
   try {
     const state = await loadMonitorState(env);
     const [tickersAll, oiAll, news, xs] = await Promise.all([
       jfetch<Ticker[]>(VISION + "/api/v3/ticker/24hr", 15000),
       jfetch<{ code?: string; data?: { instId: string; oiUsd: string }[] }>(OKX + "/api/v5/public/open-interest?instType=SWAP", 12000),
-      Promise.all([collectNews(), readAllNewsCaches(env)]).then(([a,b]) => {
+      Promise.all([collectNews(), readAllNewsCaches(env)]).then(async ([a,b]) => {
         const seen = new Set<string>();
         const out: NewsItem[] = [];
         for (const it of [...a, ...b]) {
@@ -208,7 +213,8 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
           if (!k || seen.has(k)) continue;
           seen.add(k); out.push(it);
         }
-        return out;
+        try { return await translateNews(env, out); }
+        catch { return out; }
       }).catch(() => [] as NewsItem[]),
       jfetch<Array<{ symbol: string; name: string; current_price: number }>>(CG_XSTOCKS, 12000),
     ]);
@@ -363,7 +369,7 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
       if (it.t && it.t < cutoff) continue;
       const key = "news:" + (it.url.split("?")[0] || it.title).slice(0, 180);
       if (cooled(state, key, 24 * 60)) continue;
-      msgs.push(`📰 ${it.title.length > 80 ? it.title.slice(0, 79) + "…" : it.title}\n来源 ${it.source}\n${it.url}`);
+      msgs.push(formatNewsTelegram(it));
       mark(state, key);
       newsN++;
     }
@@ -376,25 +382,26 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
       if (ok) sent = sendable.length;
     }
 
-    await saveMonitorState(env, state);
+    if (!dry) await saveMonitorState(env, state);
     const run: LastRun = {
       at: iso(),
       atRome: rome(),
       trigger,
       ok: true,
-      sent: opts.dry ? 0 : sent,
+      sent: dry ? 0 : sent,
       scanned: scan.length,
       sources: ["vision-24hr", "okx-funding", "okx-oi", "news"],
-      skipped: opts.dry ? "dry-run" : (sendable.length && !sent ? "telegram-failed-or-missing" : undefined),
+      skipped: dry ? "dry-run" : (sendable.length && !sent ? "telegram-failed-or-missing" : undefined),
+      preview: dry ? sendable : undefined,
     };
-    await writeLastRun(env, run);
+    if (!dry) await writeLastRun(env, run);
     return run;
   } catch (e) {
     const run: LastRun = {
       at: iso(), atRome: rome(), trigger, ok: false, sent: 0, scanned: 0,
       error: e instanceof Error ? e.message : String(e),
     };
-    await writeLastRun(env, run);
+    if (!dry) await writeLastRun(env, run);
     return run;
   }
 }

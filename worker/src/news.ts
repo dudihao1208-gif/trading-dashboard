@@ -1,6 +1,32 @@
 const UA = "Mozilla/5.0 (compatible; trading-dashboard-proxy/2.1; +https://dudihao1208-gif.github.io/trading-dashboard/)";
 
-export type NewsItem = { title: string; url: string; source: string; t: number; important?: boolean };
+export type NewsItem = { title: string; url: string; source: string; t: number; important?: boolean; excerpt?: string; titleZh?: string; summaryZh?: string };
+
+const TRACK = /^(utm_.*|fbclid|gclid|gclsrc|dclid|msclkid|twclid|yclid|mc_cid|mc_eid|igshid|si|icid|cmpid|ncid|spm|scm|ref|ref_src|_ga|_gl|wbraid|gbraid|ocid|srsltid|mkt_tok)$/i;
+
+export function cleanUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    for (const k of [...u.searchParams.keys()]) {
+      if (TRACK.test(k)) u.searchParams.delete(k);
+    }
+    u.hash = "";
+    let s = u.toString();
+    if (s.endsWith("?") || s.endsWith("&")) s = s.replace(/[?&]+$/, "");
+    return s;
+  } catch {
+    return raw;
+  }
+}
+
+/** 标题以拉丁字母为主则视为英文，需翻译；已是中文的不译。 */
+export function isMostlyEnglish(s: string): boolean {
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latin = (s.match(/[A-Za-z]/g) || []).length;
+  if (cjk >= 4 && cjk >= latin) return false;
+  return latin >= 6 && latin > cjk;
+}
+
 
 const IMPORTANCE = [
   "ETF", "SEC", "CFTC", "FOMC", "CPI", "PCE", "NFP", "Fed", "FED",
@@ -37,10 +63,12 @@ function parseRss(xml: string, source: string): NewsItem[] {
     const titleRaw = (b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
     const linkRaw = (b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1] || (b.match(/<link[^>]+href="([^"]+)"/i) || [])[1] || "";
     const date = (b.match(/<pubDate[^>]*>([^<]+)/i) || [])[1];
+    const descRaw = (b.match(/<description[^>]*>([\s\S]*?)<\/description>/i) || [])[1] || (b.match(/<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i) || [])[1] || "";
     const title = decodeXml(titleRaw);
-    const link = decodeXml(linkRaw);
+    const link = cleanUrl(decodeXml(linkRaw));
+    const excerpt = decodeXml(descRaw).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 400);
     const t = date ? Date.parse(date) : Date.now();
-    if (title && link) items.push({ title, url: link, source, t: Number.isFinite(t) ? t : Date.now(), important: isImportantHeadline(title, source) });
+    if (title && link) items.push({ title, url: link, source, t: Number.isFinite(t) ? t : Date.now(), important: isImportantHeadline(title, source), excerpt: excerpt || undefined });
   }
   return items;
 }
@@ -72,7 +100,7 @@ export async function collectNews(): Promise<NewsItem[]> {
         const title = String(r.title || r.content_short || "").trim();
         const url = String(r.uri || r.source_uri || "").trim();
         const t = Number(r.display_time || 0);
-        if (title && url) out.push({ title, url, source: "华尔街见闻", t: t > 1e12 ? t : t * 1000 || Date.now(), important: isImportantHeadline(title, "华尔街见闻") });
+        if (title && url) out.push({ title, url: cleanUrl(url), source: "华尔街见闻", t: t > 1e12 ? t : t * 1000 || Date.now(), important: isImportantHeadline(title, "华尔街见闻") });
       }
       return out.slice(0, 8);
     }),
@@ -97,7 +125,7 @@ export async function collectNews(): Promise<NewsItem[]> {
               const code = String(a.code || "").trim();
               if (!title) continue;
               const link = code ? `https://www.binance.com/zh-CN/support/announcement/${code}` : "https://www.binance.com/zh-CN/support/announcement";
-              out.push({ title, url: link, source: "币安公告", t: Number(a.releaseDate) || Date.now(), important: true });
+              out.push({ title, url: cleanUrl(link), source: "币安公告", t: Number(a.releaseDate) || Date.now(), important: true });
             }
           } catch { /* skip this host/path */ }
         }));
