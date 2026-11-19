@@ -1,15 +1,23 @@
 {
   "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"],
-  "price_alerts": [
-    {"symbol": "BTCUSDT", "above": 120000, "below": 50000},
-    {"symbol": "ETHUSDT", "above": 5000, "below": 1200}
-  ],
-  "funding_abs_threshold": 0.0005,
-  "volume_spike_ratio": 3.0,
+  "price_alerts": [],
+  "dashboard_url": "https://dudihao1208-gif.github.io/trading-dashboard/",
+  "funding_abs_threshold": 0.001,
+  "volume_spike_ratio": 4.0,
   "volume_interval": "5m",
   "volume_lookback": 24,
-  "liquidation_alert_usd": 1000000,
-  "cooldown_minutes": 60,
+  "liquidation_alert_usd": 2000000,
+  "cooldown_minutes": 180,
   "calendar_impact": ["High"],
-  "prefer_official_binance": true
+  "prefer_official_binance": true,
+  "radar": {
+    "oi_surge_pct": 8,
+    "fng_extreme_low": 15,
+    "fng_extreme_high": 85,
+    "stock_premium_pct": 5,
+    "watchlist_move_pct": 8,
+    "watchlist_short_pct": 4,
+    "fng_cooldown_hours": 24,
+    "premium_cooldown_hours": 12
+  }
 }

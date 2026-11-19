@@ -1,11 +1,13 @@
 .venv/
 venv/
+node_modules/
+dist/
 __pycache__/
 *.pyc
 .monitor-state.json
 .env
 .env.*
-/etc-secrets
-*.log
+*.local
 .DS_Store
 Thumbs.db
+public/public-data/

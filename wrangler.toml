@@ -1,0 +1,11 @@
+name = "trading-dashboard-proxy"
+main = "worker/src/index.ts"
+compatibility_date = "2025-11-01"
+
+# 部署（我不会替你建 Cloudflare 账号或执行发布）：
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler deploy
+#
+# 部署成功后得到 https://trading-dashboard-proxy.<你的子域>.workers.dev
+# 把该地址填进观察台「我的 → 设置」，或在 Pages 构建里设置 VITE_WORKER_URL。
