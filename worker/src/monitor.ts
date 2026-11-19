@@ -1,26 +1,24 @@
-import { underlyingOf, sanePremium } from "./map";
-import { collectNews, isImportantHeadline, type NewsItem } from "./news";
+import { collectNews, type NewsItem } from "./news";
 import { translateNews, formatNewsTelegram } from "./translate";
+import { evaluateNews, storyKey } from "./score";
 import type { Env } from "./index";
 
 const VISION = "https://data-api.binance.vision";
 const OKX = "https://www.okx.com";
-const CG_XSTOCKS = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&category=xstocks-ecosystem&order=market_cap_desc&per_page=40&page=1";
 const FF = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
 const UA = "Mozilla/5.0 (compatible; trading-dashboard-proxy/2.1)";
 const MAJORS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"];
 const LEV = /(UP|DOWN|BULL|BEAR|3L|3S|5L|5S)USDT$/;
-const MIN_QUOTE = 20_000_000;
+const MIN_QUOTE = 50_000_000;
 const SCAN_CAP = 40;
-const VOL_CAP = 12;
-const FUND_CAP = 25;
+const VOL_CAP = 8;
+const FUND_CAP = 8;
 const FUND_TH = 0.001;
-const VOL_RATIO = 4;
-const OI_SURGE = 8;
-const OI_PX = 1.5;
-const PREM_TH = 5;
-const WATCH_MOVE = 8;
-const COOL_MIN = 180;
+const VOL_RATIO = 5;
+const OI_SURGE = 10;
+const COOL_MIN = 480; // 机会类：同一标的 8 小时冷却
+const MAX_TOTAL = 3;
+const MAX_NEWS = 2;
 const EQUITY_DEFAULT = ["AAPL","NVDA","TSLA","GOOGL","AMZN","MSFT","META","SPY","QQQ","MSTR","COIN","INTC","AMD","CRCL","SNDK","PLTR"];
 
 export type MonitorState = {
@@ -202,10 +200,10 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
 
   try {
     const state = await loadMonitorState(env);
-    const [tickersAll, oiAll, news, xs] = await Promise.all([
+    const [tickersAll, oiAll, news] = await Promise.all([
       jfetch<Ticker[]>(VISION + "/api/v3/ticker/24hr", 15000),
       jfetch<{ code?: string; data?: { instId: string; oiUsd: string }[] }>(OKX + "/api/v5/public/open-interest?instType=SWAP", 12000),
-      Promise.all([collectNews(), readAllNewsCaches(env)]).then(async ([a,b]) => {
+      Promise.all([collectNews({ compact: true }), readAllNewsCaches(env)]).then(([a,b]) => {
         const seen = new Set<string>();
         const out: NewsItem[] = [];
         for (const it of [...a, ...b]) {
@@ -213,10 +211,8 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
           if (!k || seen.has(k)) continue;
           seen.add(k); out.push(it);
         }
-        try { return await translateNews(env, out); }
-        catch { return out; }
+        return out;
       }).catch(() => [] as NewsItem[]),
-      jfetch<Array<{ symbol: string; name: string; current_price: number }>>(CG_XSTOCKS, 12000),
     ]);
 
     const liquid: Ticker[] = [];
@@ -271,110 +267,103 @@ export async function runScheduled(env: Env, trigger: string, opts: { dry?: bool
       if (funding[r.sym] && funding[r.sym].oi_usd == null) funding[r.sym].oi_usd = r.oiUsd;
     }
 
-    const volTargets = liquid.slice(0, VOL_CAP).map((x) => x.symbol);
-    const spikes: { symbol: string; ratio: number; chg: number; close: number }[] = [];
+    const liquid50 = liquid.filter((x) => Number(x.quoteVolume) >= MIN_QUOTE);
+    const volTargets = liquid50.slice(0, VOL_CAP).map((x) => x.symbol);
+    const spikes: { symbol: string; ratio: number; chg: number; close: number; rangeHigh: number; rangeLow: number; dir: "up" | "down"; quoteVol: number }[] = [];
     await Promise.all(volTargets.map(async (sym) => {
       const data = await jfetch<(string | number)[][]>(`${VISION}/api/v3/klines?symbol=${sym}&interval=5m&limit=26`, 8000);
-      if (!Array.isArray(data) || data.length < 10) return;
+      if (!Array.isArray(data) || data.length < 12) return;
       const closed = data.slice(0, -1);
       const vols = closed.map((k) => +k[5]).filter((n) => Number.isFinite(n));
-      if (vols.length < 6) return;
+      if (vols.length < 8) return;
       const last = vols[vols.length - 1];
       const prev = vols.slice(0, -1).sort((a, b) => a - b);
       const med = prev[Math.floor(prev.length / 2)];
       if (med <= 0 || last / med < VOL_RATIO) return;
+      const prior = closed.slice(0, -1);
+      const rangeHigh = Math.max(...prior.map((k) => +k[2]));
+      const rangeLow = Math.min(...prior.map((k) => +k[3]));
       const candle = closed[closed.length - 1];
       const o = +candle[1], c = +candle[4];
+      if (!rangeHigh || !rangeLow || !c) return;
+      let dir: "up" | "down" | null = null;
+      if (c > rangeHigh) dir = "up";
+      else if (c < rangeLow) dir = "down";
+      if (!dir) return;
       const chg = o ? (c / o - 1) * 100 : 0;
-      if (Math.abs(chg) < 0.5) return;
-      spikes.push({ symbol: sym, ratio: last / med, chg, close: c });
+      const quoteVol = Number((tickers[sym] || liquid50.find((x) => x.symbol === sym) || {}).quoteVolume || 0);
+      spikes.push({ symbol: sym, ratio: last / med, chg, close: c, rangeHigh, rangeLow, dir, quoteVol });
     }));
-
-    const xsList = Array.isArray(xs) ? xs : [];
-    const needEq = xsList.map((c) => underlyingOf(c.symbol)).filter((u): u is string => !!u);
-    const [eqPack] = await Promise.all([
-      refreshEquitiesKv(env, needEq, false),
-      refreshCalendarKv(env, false),
-    ]);
-    const quotes = eqPack?.quotes || {};
 
     const msgs: string[] = [];
     const dash = "https://dudihao1208-gif.github.io/trading-dashboard/";
+    const cooledSym = (sym: string) => cooled(state, "opp:" + sym, COOL_MIN);
+    const markSym = (sym: string) => mark(state, "opp:" + sym);
 
+    // 机会只保留高流动性 + 共振，不再单凭资金费、放量或自选涨跌推送
+    const prevOi = { ...(state.oi_usd || {}) };
+    const nextOi = { ...prevOi };
     for (const [sym, row] of Object.entries(funding)) {
+      if (row.oi_usd) nextOi[sym] = row.oi_usd;
+    }
+    state.oi_usd = nextOi;
+
+    const fundOi: string[] = [];
+    for (const [sym, row] of Object.entries(funding)) {
+      const qv = Number((tickers[sym] || {}).quoteVolume || 0);
+      if (qv < MIN_QUOTE) continue;
       if (Math.abs(row.rate) < FUND_TH) continue;
-      const key = `${sym}:funding:${row.rate > 0 ? "pos" : "neg"}`;
-      if (cooled(state, key, COOL_MIN)) continue;
-      const side = row.rate > 0 ? "多头付费" : "空头付费";
-      msgs.push(`💸 资金费极端 ${sym}\n资金费率 ${(row.rate * 100).toFixed(4)}%（${side}，来源 ${row.source}，阈值 ±${(FUND_TH * 100).toFixed(3)}%）\n${dash}?tab=chart&symbol=${sym}`);
-      mark(state, key);
-    }
-
-    for (const sp of spikes) {
-      const key = `${sp.symbol}:volspike`;
-      if (cooled(state, key, COOL_MIN)) continue;
-      msgs.push(`📊 放量突破 ${sp.symbol}\n最近一根 5m 成交量约为中位数的 ${sp.ratio.toFixed(1)} 倍，收 ${sp.close}，该根 ${sp.chg >= 0 ? "+" : ""}${sp.chg.toFixed(2)}%\n${dash}?tab=chart&symbol=${sp.symbol}`);
-      mark(state, key);
-    }
-
-    const prevOi = state.oi_usd || (state.oi_usd = {});
-    for (const [sym, row] of Object.entries(funding)) {
       const oi = row.oi_usd;
       if (!oi) continue;
-      const old = prevOi[sym];
-      prevOi[sym] = oi;
-      if (!old) continue;
-      const chg = (oi / old - 1) * 100;
-      if (Math.abs(chg) < OI_SURGE) continue;
+      const oldOi = prevOi[sym];
+      if (!oldOi) continue;
+      const oiChg = (oi / oldOi - 1) * 100;
+      if (Math.abs(oiChg) < OI_SURGE) continue;
+      if (cooledSym(sym)) continue;
+      const px = Number((tickers[sym] || {}).lastPrice || 0);
       const pxMove = Number((tickers[sym] || {}).priceChangePercent || 0);
-      if (Math.abs(pxMove) < OI_PX) continue;
-      const key = `${sym}:oi:${chg > 0 ? "up" : "dn"}`;
-      if (cooled(state, key, COOL_MIN)) continue;
-      const last = (tickers[sym] || {}).lastPrice;
-      msgs.push(`📦 持仓量骤变 ${sym}\n持仓 ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%（约 $${Math.round(oi).toLocaleString()}），同期 24h 价格 ${pxMove >= 0 ? "+" : ""}${pxMove.toFixed(2)}%${last ? "，现价 " + last : ""}\n${dash}?tab=chart&symbol=${sym}`);
-      mark(state, key);
+      const crowdedLong = row.rate > 0;
+      const dir = crowdedLong ? "偏空警戒" : "偏多警戒";
+      const side = crowdedLong ? "多头付费，拥挤多头" : "空头付费，拥挤空头";
+      fundOi.push(sym);
+      msgs.push(
+        `💸 资金费极端 + 持仓骤变 ${sym}（${dir}）
+资金费率 ${(row.rate * 100).toFixed(4)}%（${side}），持仓 ${oiChg >= 0 ? "+" : ""}${oiChg.toFixed(1)}% 至约 $${Math.round(oi).toLocaleString()}，现价 ${px || "—"}，24h 价格 ${pxMove >= 0 ? "+" : ""}${pxMove.toFixed(2)}%。
+${dash}?tab=chart&symbol=${sym}`
+      );
+      markSym(sym);
+      if (msgs.length >= MAX_TOTAL) break;
+    }
+    for (const sp of spikes) {
+      if (msgs.length >= MAX_TOTAL) break;
+      if (fundOi.includes(sp.symbol) || cooledSym(sp.symbol)) continue;
+      const dir = sp.dir === "up" ? "偏多" : "偏空";
+      const level = sp.dir === "up" ? `站上近 2 小时区间高点 ${sp.rangeHigh}` : `跌破近 2 小时区间低点 ${sp.rangeLow}`;
+      const qv = sp.quoteVol ? `，24h 成交约 $${Math.round(sp.quoteVol).toLocaleString()}` : "";
+      msgs.push(
+        `📊 放量突破 ${sp.symbol}（${dir}）\n5m 成交量为近端中位数的 ${sp.ratio.toFixed(1)} 倍，收 ${sp.close} ${level}（区间 ${sp.rangeLow}–${sp.rangeHigh}）${qv}。\n${dash}?tab=chart&symbol=${sp.symbol}`
+      );
+      markSym(sp.symbol);
     }
 
-    for (const c of xsList) {
-      const sym = String(c.symbol || "").toUpperCase();
-      const u = underlyingOf(sym);
-      const q = u ? quotes[u] : null;
-      if (!u || !q?.price || !c.current_price) continue;
-      const prem = sanePremium(c.current_price, q.price);
-      if (prem == null || Math.abs(prem) < PREM_TH) continue;
-      const key = `prem:${sym}:${prem > 0 ? "hi" : "lo"}`;
-      if (cooled(state, key, 12 * 60)) continue;
-      const kind = prem > 0 ? "溢价" : "折价";
-      msgs.push(`🏷️ 代币${kind}扩大 ${sym}\n相对正股 ${u} ${prem >= 0 ? "+" : ""}${prem.toFixed(2)}%（代币 ${c.current_price.toFixed(2)} / 正股 ${q.price.toFixed(2)}）\n${dash}?tab=mine`);
-      mark(state, key);
+    const newsRoom = Math.max(0, Math.min(MAX_NEWS, MAX_TOTAL - msgs.length));
+    if (newsRoom > 0) {
+      const ev = await evaluateNews(env, news, 24);
+      const picked = ev.newPassed.slice(0, newsRoom + 3); // 预留冷却后仍够用
+      let translated: NewsItem[] = picked;
+      try { translated = await translateNews(env, picked); } catch { /* 用原文 */ }
+      const byUrl = new Map(translated.map((it) => [(it.url || "").split("?")[0], it]));
+      for (const it of ev.newPassed) {
+        if (msgs.filter((m) => m.startsWith("📰")).length >= newsRoom) break;
+        const key = "news:" + (storyKey(it.titleZh || it.title) || (it.url || "").split("?")[0] || it.title).slice(0, 180);
+        if (cooled(state, key, 24 * 60)) continue;
+        const zh = byUrl.get((it.url || "").split("?")[0]) || it;
+        msgs.push(formatNewsTelegram({ ...it, ...zh }));
+        mark(state, key);
+      }
     }
 
-    for (const sym of MAJORS) {
-      const t = tickers[sym];
-      if (!t) continue;
-      const chg = Number(t.priceChangePercent || 0);
-      if (Math.abs(chg) < WATCH_MOVE) continue;
-      const key = `${sym}:d24`;
-      if (cooled(state, key, 12 * 60)) continue;
-      msgs.push(`⚡ 自选大波动 ${sym}\n24h ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%（阈值 ±${WATCH_MOVE}%），现价 ${t.lastPrice}\n${dash}?tab=chart&symbol=${sym}`);
-      mark(state, key);
-    }
-
-    let newsN = 0;
-    const cutoff = Date.now() - 12 * 3600_000;
-    for (const it of news) {
-      if (newsN >= 2) break;
-      if (!it.title || !it.url) continue;
-      if (!it.important && !isImportantHeadline(it.title, it.source)) continue;
-      if (it.t && it.t < cutoff) continue;
-      const key = "news:" + (it.url.split("?")[0] || it.title).slice(0, 180);
-      if (cooled(state, key, 24 * 60)) continue;
-      msgs.push(formatNewsTelegram(it));
-      mark(state, key);
-      newsN++;
-    }
-
-    const sendable = msgs.slice(0, 4);
+    const sendable = msgs.slice(0, MAX_TOTAL);
     let sent = 0;
     if (sendable.length && !opts.dry) {
       const body = "📡 观察台提醒\n" + rome() + "\n\n" + sendable.join("\n\n") + footer();

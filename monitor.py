@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """交易观察台监控：GitHub Actions 轮询 或 --realtime WebSocket 常驻。
 
-Telegram 只推重要新闻（关键词过滤）和具体交易机会（放量突破、极端资金费、
-持仓量骤升且价格同步变动、代币溢价/折价扩大、自选大波动）。不推送恐慌贪婪等
-情绪指数。所有提醒带冷却、去重与单轮条数上限。不是投资建议，不下单。
+Telegram 只推真正能影响价格的资讯（评分≥4）和高流动性永续上的共振机会
+（放量+区间突破，或极端资金费+持仓骤变）。不推送评论、预测、综述、议员警告、
+单独的资金费/溢价/自选涨跌。所有提醒带冷却、跨源故事去重与单轮约 3 条上限。
+不是投资建议，不下单。
 密钥只用环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，不要写进仓库。
 Worker 地址用环境变量 WORKER_URL 或 config 里的 worker_url（不是密钥）。
 去重状态优先与 Cloudflare KV 同步（MONITOR_SECRET）；Actions cache 仅作后备。
@@ -50,7 +51,7 @@ KNOWN_UNDER = {
 }
 PREMIUM_CAP = 30.0
 LEV_RE = re.compile(r"(UP|DOWN|BULL|BEAR|3L|3S|5L|5S)USDT$")
-MIN_QUOTE_VOL = 20_000_000
+MIN_QUOTE_VOL = 50_000_000
 SCAN_CAP = 40
 VOL_SCAN_CAP = 12
 
@@ -171,7 +172,9 @@ def load_config(path: Path) -> Dict[str, Any]:
     cfg.setdefault("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"])
     cfg.setdefault("price_alerts", [])
     cfg.setdefault("funding_abs_threshold", 0.001)
-    cfg.setdefault("volume_spike_ratio", 4.0)
+    cfg.setdefault("volume_spike_ratio", 5.0)
+    cfg.setdefault("min_quote_volume", MIN_QUOTE_VOL)
+    cfg.setdefault("cooldown_minutes", 480)
     cfg.setdefault("volume_interval", "5m")
     cfg.setdefault("volume_lookback", 24)
     cfg.setdefault("liquidation_alert_usd", 2_000_000)
@@ -424,10 +427,21 @@ def volume_spike(symbol: str, ratio: float, interval: str, lookback: int) -> Opt
         chg = ((c / o) - 1) * 100 if o else 0.0
     except Exception:
         o = c = chg = 0.0
-    # 放量突破：量能达标且该根有方向
-    if abs(chg) < 0.5:
+    prior = closed[:-1]
+    try:
+        hi = max(float(k[2]) for k in prior)
+        lo = min(float(k[3]) for k in prior)
+    except Exception:
         return None
-    return {"symbol": symbol, "ratio": r, "interval": interval, "chg": chg, "close": c}
+    if not hi or not lo or not c:
+        return None
+    if c > hi:
+        direction = "up"
+    elif c < lo:
+        direction = "down"
+    else:
+        return None
+    return {"symbol": symbol, "ratio": r, "interval": interval, "chg": chg, "close": c, "dir": direction, "range_high": hi, "range_low": lo}
 
 
 def underlying_of(xsym: str) -> Optional[str]:
@@ -478,6 +492,221 @@ def is_major_headline(title: str) -> bool:
     if len(t) < 6:
         return False
     return bool(_news_regex().search(t))
+
+
+_OPINION_RE = re.compile(
+    r"here'?s why|why it (?:matters|may)|opinion|analysis|recap|commentary|editorial|"
+    r"interview|op-ed|column|long & short|long and short|what happened in crypto today|"
+    r"here'?s what happened|price prediction|could beat|may be a mistake|analysts? say|should we (really )?(blame|care|worry)|is it time to|what it means for|"
+    r"专家认为|点评|评论员|为何值得|今日要闻|每日回顾",
+    re.I,
+)
+_WARN_RE = re.compile(
+    r"senators? warn|\bsenators?:|legislators? (?:warn|urge)|could push|may (?:run|be|push)|"
+    r"warn(?:s|ed)? (?:that|it)|警告(?:可能|或)|呼吁|建议国会",
+    re.I,
+)
+_LISTING_RE = re.compile(
+    r"will list|will delist|new listing|opens trading|will launch .{0,40}(perpetual|futures|合约)|"
+    r"上币|下架|下线|新上.?币|将上架|将推出.{0,20}(永续|合约|期货)",
+    re.I,
+)
+_ETF_RE = re.compile(
+    r"etf.{0,40}(approv|reject|deny|inflow|outflow|flow)|现货etf.{0,20}(获批|批准|否决|流入|流出)|"
+    r"(approv|reject|deny).{0,30}etf|(inflow|outflow).{0,20}(\$|usd|billion|million|亿)|净(流入|流出)",
+    re.I,
+)
+_REG_RE = re.compile(
+    r"\b(sec|cftc)\b.{0,40}(charg|sue|enforcement|settlement|fine|lawsuit|indict|order)|"
+    r"filed (a )?(lawsuit|charges)|law (?:passed|signed|enacted)|court (?:order|rules|grants)|"
+    r"冻结令|起诉|立案|罚单|执法|通过.{0,6}(法案|法律)",
+    re.I,
+)
+_MACRO_RE = re.compile(
+    r"\b(cpi|pce|nfp|nonfarm|fomc|fed)\b.{0,30}(print|comes? in|released?|holds?|cuts?|hikes?|raises?|keeps?)|"
+    r"(cpi|非农|pce|利率).{0,10}(公布|落地|决议|维持|上调|下调|降息|加息)|降息.{0,6}(基点|bp)|加息.{0,6}(基点|bp)",
+    re.I,
+)
+_OUTAGE_RE = re.compile(
+    r"outage|halted withdrawals?|suspends? (withdrawals?|trading)|insolven|bankrupt|bank run|"
+    r"暂停(充|提|交易)|宕机|提现暂停|破产|暴雷|停摆",
+    re.I,
+)
+_UNLOCK_RE = re.compile(r"token unlock|cliff unlock|解锁.{0,10}(代币|token)|大额解锁", re.I)
+_HACK_RE = re.compile(r"hack|exploit|breach|stolen|drained|被盗|盗币|攻击|漏洞利用|被黑", re.I)
+_HACK_FOLLOW_RE = re.compile(r"court docs|court documents|freezing order|冻结令|recover stolen|investigation|investigat|after the (?:hack|exploit)|expands .{0,20}hack", re.I)
+_NOT_LISTING_RE = re.compile(r"collateral asset|as collateral|抵押品|作为抵押|zero maker fee promotion", re.I)
+_MAJOR_RE = re.compile(
+    r"binance|coinbase|okx|bybit|kraken|bitfinex|bitget|upbit|gemini|tether|"
+    r"uniswap|aave|lido|makerdao|maker\\b|币安|火币|欧易",
+    re.I,
+)
+_TOP_UNLOCK_RE = re.compile(
+    r"unlock.{0,20}(btc|eth|sol|bnb|xrp|doge|ada|avax|dot|link|sui|near|apt)|"
+    r" (btc|eth|sol|bnb|xrp|doge|ada|avax|sui).{0,20}unlock",
+    re.I,
+)
+
+
+def parse_usd(text: str):
+    t = (text or "").replace(",", " ")
+    pats = [
+        (r"\$?\s*(\d+(?:\.\d+)?)\s*(?:billion|bn)\b", 1e9),
+        (r"\$\s*(\d+(?:\.\d+)?)\s*b\b", 1e9),
+        (r"(\d+(?:\.\d+)?)\s*亿美元", 1e8),
+        (r"\$?\s*(\d+(?:\.\d+)?)\s*(?:million|mm|mio)\b", 1e6),
+        (r"\$\s*(\d+(?:\.\d+)?)\s*m\b", 1e6),
+        (r"(\d+(?:\.\d+)?)\s*万美元", 1e4),
+        (r"(\d+(?:\.\d+)?)\s*亿(?!美元)", 1e8),
+    ]
+    for pat, mul in pats:
+        m = re.search(pat, t, re.I)
+        if m:
+            return float(m.group(1)) * mul
+    return None
+
+
+def is_low_value_news(title: str, source: str = "", excerpt: str = "") -> bool:
+    blob = f"{title} {excerpt}"
+    if _OPINION_RE.search(blob) or _OPINION_RE.search(title or ""):
+        return True
+    if _WARN_RE.search(blob):
+        return True
+    if re.search(r"newsletter|daily digest|in today'?s (letter|newsletter)", title or "", re.I) and not _HACK_RE.search(blob) and not _LISTING_RE.search(blob):
+        return True
+    if "华尔街见闻" in (source or "") and not any(r.search(blob) for r in (_MACRO_RE, _ETF_RE, _REG_RE, _HACK_RE)):
+        if not re.search(r"bitcoin|btc|eth|crypto|比特币|以太|美联储|非农|cpi|etf", blob, re.I):
+            return True
+    return False
+
+
+def classify_boost(title: str, source: str = "", excerpt: str = ""):
+    blob = f"{title} {excerpt}"
+    if not _NOT_LISTING_RE.search(title or "") and (("币安" in (source or "") and _LISTING_RE.search(title or "")) or _LISTING_RE.search(title or "") or _LISTING_RE.search(blob)):
+        return "listing"
+    if _HACK_RE.search(blob) and not _HACK_FOLLOW_RE.search(blob):
+        usd = parse_usd(blob)
+        if (usd is not None and usd >= 10_000_000) or _MAJOR_RE.search(title or "") or _MAJOR_RE.search(blob):
+            return "hack"
+        return None
+    if _ETF_RE.search(title or ""):
+        return "etf"
+    if _REG_RE.search(blob) and not _WARN_RE.search(blob):
+        return "reg"
+    if _MACRO_RE.search(blob) and not re.search(r"may be|here'?s why|可能是错误", blob, re.I):
+        return "macro"
+    if _OUTAGE_RE.search(blob) and _MAJOR_RE.search(blob):
+        return "outage"
+    if _UNLOCK_RE.search(blob) and (_TOP_UNLOCK_RE.search(blob) or _MAJOR_RE.search(blob)):
+        return "unlock"
+    return None
+
+
+def default_why(cat: str) -> str:
+    return {
+        "listing": "交易所正式上架或下架/上线永续，相关合约流动性与价格可能立刻重定价。",
+        "hack": "大规模被盗或攻击会引发避险抛售，并冲击涉事交易所或协议的代币。",
+        "etf": "现货 ETF 审批或大额资金进出，会直接改变比特币等的买盘或卖压。",
+        "reg": "监管执法或法律落地可能改变合规预期，影响交易所与代币估值。",
+        "macro": "利率或重磅宏观数据公布，通常会带动风险资产整体波动。",
+        "outage": "大型交易所故障或兑付问题会打断交易并可能引发挤兑式抛售。",
+        "unlock": "主流币大额解锁增加流通供应，短线常有抛压。",
+    }.get(cat) or "若属实，可能立刻影响相关资产价格。"
+
+
+def story_key(title: str) -> str:
+    t = re.sub(r"https?:\/\/\S+", " ", (title or "").lower())
+    t = re.sub("[^a-z0-9\u4e00-\u9fff$]+", " ", t)
+    t = re.sub(r"\b(the|a|an|and|or|of|in|on|for|to|as|with|from|by|at|its|is|are|was|will|says?|after|over)\b", " ", t)
+    parts = [w for w in t.split() if len(w) >= 3 or re.search("[0-9\u4e00-\u9fff]", w)][:8]
+    return " ".join(parts)
+
+
+def local_score_news(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    title = str(it.get("title") or "")
+    excerpt = f"{it.get('excerpt') or ''} {it.get('summaryZh') or ''}"
+    source = str(it.get("source") or "")
+    if is_low_value_news(title, source, excerpt):
+        return None
+    cat = classify_boost(title, source, excerpt)
+    if not cat:
+        return None
+    out = dict(it)
+    out["score"] = 4
+    out["whyZh"] = default_why(cat)
+    out["category"] = cat
+    return out
+
+
+def extract_published_at(title: str, t: float = 0, source: str = "") -> float:
+    m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", title or "") or re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})", title or "")
+    from_title = 0.0
+    if m:
+        try:
+            from datetime import datetime, timezone
+            from_title = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 12, 0, tzinfo=timezone.utc).timestamp() * 1000
+        except Exception:
+            from_title = 0.0
+    raw = float(t or 0)
+    if raw and raw < 1e12:
+        raw *= 1000
+    if "币安" in (source or "") and not from_title:
+        return 0.0
+    if from_title and (not raw or raw - from_title > 36 * 3600 * 1000):
+        return from_title
+    if from_title:
+        return from_title
+    return raw or 0.0
+
+
+def filter_news_for_push(items: List[Dict[str, Any]], hours: float = 24) -> List[Dict[str, Any]]:
+    cutoff = now_ts() * 1000 - hours * 3600 * 1000
+    windowed = []
+    for it in items:
+        title = str(it.get("title") or "").strip()
+        url = str(it.get("url") or "").strip()
+        if not title or not url:
+            continue
+        try:
+            ts = extract_published_at(title, float(it.get("t") or 0), str(it.get("source") or ""))
+        except (TypeError, ValueError):
+            ts = extract_published_at(title, 0, str(it.get("source") or ""))
+        if ts and ts < cutoff:
+            continue
+        windowed.append(it)
+
+    passed = None
+    secret = os.environ.get("MONITOR_SECRET") or ""
+    base = (WORKER_URL or "").rstrip("/")
+    if base and secret:
+        try:
+            r = SESSION.post(
+                base + "/monitor/filter-news?hours=" + str(int(hours)),
+                headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"},
+                json={"items": windowed, "hours": hours},
+                timeout=45,
+            )
+            if r.ok:
+                data = r.json()
+                rows = data.get("newTitles") or data.get("newPassed") or []
+                if isinstance(rows, list):
+                    passed = rows
+                    log(f"Worker 新闻过滤：旧规则 {data.get('oldCount')} 条，新规则 {data.get('newCount')} 条")
+        except Exception as e:
+            log(f"Worker 新闻过滤失败，改用本地硬规则：{e}")
+    if passed is None:
+        scored = [x for x in (local_score_news(it) for it in windowed) if x]
+        # 跨源去重
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        order = []
+        for it in scored:
+            k = story_key(str(it.get("titleZh") or it.get("title") or "")) or str(it.get("url") or "").split("?")[0]
+            if k not in groups:
+                groups[k] = []
+                order.append(k)
+            groups[k].append(it)
+        passed = [groups[k][0] for k in order]
+    return passed
 
 
 
@@ -535,7 +764,7 @@ def fetch_binance_announcements() -> List[Dict[str, Any]]:
                     ts = float(a.get("releaseDate") or 0)
                 except (TypeError, ValueError):
                     ts = 0
-                items.append({"title": title, "url": url, "source": "币安公告", "t": ts or (now_ts() * 1000), "important": True})
+                items.append({"title": title, "url": url, "source": "币安公告", "t": ts or 0, "important": True})
                 got += 1
         if got:
             break
@@ -642,158 +871,113 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
                 )
                 mark(state, key)
 
-    # 资金费极端
+    max_total = int(cfg.get("max_alerts_per_run") or 3)
+    base_n = len(msgs)  # 用户自设价格提醒不占机会名额
+    min_q = float(cfg.get("min_quote_volume") or MIN_QUOTE_VOL)
     th_f = float(cfg.get("funding_abs_threshold") or 0.001)
-    for sym, row in funding.items():
-        rate = row.get("rate")
-        if rate is None or abs(rate) < th_f:
-            continue
-        key = f"{sym}:funding:{'pos' if rate > 0 else 'neg'}"
-        if cooled(state, key, cooldown):
-            continue
-        side = "多头付费" if rate > 0 else "空头付费"
-        msgs.append(
-            f"💸 资金费极端 {sym}\n资金费率 {(rate * 100):.4f}%（{side}，来源 {row.get('source')}，阈值 ±{th_f * 100:.3f}%）\n{chart_link(cfg, sym)}"
-        )
-        mark(state, key)
+    oi_th = float(rd.get("oi_surge_pct") or 10)
+    opp_cd = float(cfg.get("cooldown_minutes") or 480)
+    used = set()
 
-    # 放量
-    ratio = float(cfg.get("volume_spike_ratio") or 4.0)
-    interval = str(cfg.get("volume_interval") or "5m")
-    lookback = int(cfg.get("volume_lookback") or 24)
-    for sym in vol_syms:
-        spike = volume_spike(sym, ratio, interval, lookback)
-        if not spike:
-            continue
-        key = f"{sym}:volspike"
-        if cooled(state, key, cooldown):
-            continue
-        chg = spike.get("chg")
-        close = spike.get("close")
-        px = f"，收 {fmt_price(close)}，该根 {chg:+.2f}%" if close and chg is not None else ""
-        msgs.append(
-            f"📊 放量突破 {sym}\n最近一根 {spike['interval']} 成交量约为中位数的 {spike['ratio']:.1f} 倍{px}\n{chart_link(cfg, sym)}"
-        )
-        mark(state, key)
-        time.sleep(0.05)
-
-    # 持仓量骤升：与上次快照比较；第一次只记底，不告警
-    oi_th = float(rd.get("oi_surge_pct") or 8)
+    # 资金费极端 + 持仓骤变（共振）
     prev_oi = state.setdefault("oi_usd", {})
+    next_oi = dict(prev_oi)
     for sym, row in funding.items():
         oi = row.get("oi_usd")
-        if not oi:
+        if oi:
+            next_oi[sym] = oi
+    for sym, row in funding.items():
+        if len(msgs) - base_n >= max_total:
+            break
+        if _qv(sym) < min_q:
+            continue
+        rate = row.get("rate")
+        oi = row.get("oi_usd")
+        if rate is None or abs(rate) < th_f or not oi:
             continue
         old = prev_oi.get(sym)
-        prev_oi[sym] = oi
         if not old:
             continue
-        chg = (oi / old - 1) * 100
-        if abs(chg) < oi_th:
+        oi_chg = (oi / old - 1) * 100
+        if abs(oi_chg) < oi_th:
             continue
-        # 须同时有价格变动，避免无交易意义的空仓迁移
+        key = f"opp:{sym}"
+        if cooled(state, key, opp_cd):
+            continue
+        last = (tickers.get(sym) or {}).get("lastPrice")
         px_move = 0.0
         try:
             px_move = float((tickers.get(sym) or {}).get("priceChangePercent") or 0)
         except (TypeError, ValueError):
             px_move = 0.0
-        px_th = float(rd.get("oi_price_move_pct") or 1.5)
-        if abs(px_move) < px_th:
-            continue
-        key = f"{sym}:oi:{'up' if chg > 0 else 'dn'}"
-        if cooled(state, key, cooldown):
-            continue
-        last = (tickers.get(sym) or {}).get("lastPrice")
+        crowded_long = rate > 0
+        direction = "偏空警戒" if crowded_long else "偏多警戒"
+        side = "多头付费，拥挤多头" if crowded_long else "空头付费，拥挤空头"
         pxbit = f"，现价 {fmt_price(float(last))}" if last else ""
         msgs.append(
-            f"📦 持仓量骤变 {sym}\n持仓 {chg:+.1f}%（约 ${oi:,.0f}），同期 24h 价格 {px_move:+.2f}%{pxbit}\n{chart_link(cfg, sym)}"
+            f"💸 资金费极端 + 持仓骤变 {sym}（{direction}）\n"
+            f"资金费率 {(rate * 100):.4f}%（{side}），持仓 {oi_chg:+.1f}% 至约 ${oi:,.0f}{pxbit}，24h 价格 {px_move:+.2f}%\n"
+            f"{chart_link(cfg, sym)}"
         )
         mark(state, key)
+        used.add(sym)
+    state["oi_usd"] = next_oi
 
-    # 代币溢价 / 折价扩大
-    prem_th = float(rd.get("stock_premium_pct") or 5)
-    prem_cd = float(rd.get("premium_cooldown_hours") or 12) * 60
-    eq_path = ROOT / "public-data" / "equities.json"
-    eq = load_json(eq_path, {}) or {}
-    quotes = eq.get("quotes") or {}
-    xs = http_get(CG_XSTOCKS)
-    if isinstance(xs, list):
-        for c in xs:
-            try:
-                sym = str(c.get("symbol") or "").upper()
-                tok = float(c.get("current_price"))
-                u = underlying_of(sym)
-                q = quotes.get(u) if u else None
-                if not q or not q.get("price"):
-                    continue
-                prem = (tok / float(q["price"]) - 1) * 100
-                if abs(prem) < prem_th or abs(prem) > PREMIUM_CAP:
-                    continue
-                key = f"prem:{sym}:{'hi' if prem > 0 else 'lo'}"
-                if cooled(state, key, prem_cd):
-                    continue
-                kind = "溢价" if prem > 0 else "折价"
-                dash = str(cfg.get("dashboard_url") or "").rstrip("/") + "/?tab=mine"
-                msgs.append(
-                    f"🏷️ 代币{kind}扩大 {sym}\n相对正股 {u} {prem:+.2f}%（代币 {tok:.2f} / 正股 {float(q['price']):.2f}）\n{dash}"
-                )
-                mark(state, key)
-            except Exception:
-                continue
-
-    # 自选 24h 大波动（仅配置的 symbols，冷却长）
-    move_th = float(rd.get("watchlist_move_pct") or 8)
-    for sym in symbols:
-        if sym not in tickers:
-            continue
-        try:
-            chg = float(tickers[sym].get("priceChangePercent") or 0)
-        except (TypeError, ValueError):
-            continue
-        if abs(chg) < move_th:
-            continue
-        key = f"{sym}:d24"
-        if cooled(state, key, 12 * 60):
-            continue
-        px = float(tickers[sym]["lastPrice"])
-        msgs.append(
-            f"⚡ 自选大波动 {sym}\n24h {chg:+.2f}%（阈值 ±{move_th:.0f}%），现价 {fmt_price(px)}\n{chart_link(cfg, sym)}"
-        )
-        mark(state, key)
-
-    # 重要新闻（关键词过滤，最近 12 小时，单轮最多 2 条）
-    news_cd = float(rd.get("news_cooldown_hours") or 24) * 60
-    cutoff = now_ts() * 1000 - 12 * 3600 * 1000
-    news_n = 0
-    for it in fetch_news_items():
-        if news_n >= 2:
+    # 放量 + 近端区间突破
+    ratio = float(cfg.get("volume_spike_ratio") or 5.0)
+    interval = str(cfg.get("volume_interval") or "5m")
+    lookback = int(cfg.get("volume_lookback") or 24)
+    for sym in vol_syms:
+        if len(msgs) - base_n >= max_total:
             break
-        title = str(it.get("title") or "").strip()
-        url = str(it.get("url") or "").strip()
-        if not title or not url:
+        if _qv(sym) < min_q or sym in used:
             continue
-        if not (it.get("important") or is_major_headline(title)):
+        spike = volume_spike(sym, ratio, interval, lookback)
+        if not spike:
             continue
-        try:
-            ts = float(it.get("t") or 0)
-        except (TypeError, ValueError):
-            ts = 0
-        if ts and ts < cutoff:
+        key = f"opp:{sym}"
+        if cooled(state, key, opp_cd):
             continue
-        key = "news:" + (url.split("?")[0] or title)[:180]
-        if cooled(state, key, news_cd):
-            continue
-        src = it.get("source") or "资讯"
-        zh_title = str(it.get("titleZh") or title).strip()
-        zh_sum = str(it.get("summaryZh") or "").strip()
-        link = clean_news_url(url)
-        piece = f"📰 {zh_title}"
-        if zh_sum and zh_sum != zh_title:
-            piece += "\n" + zh_sum
-        piece += f"\n来源：{src}\n{link}"
-        msgs.append(piece)
+        direction = "偏多" if spike.get("dir") == "up" else "偏空"
+        hi, lo, close = spike.get("range_high"), spike.get("range_low"), spike.get("close")
+        level = f"站上近 2 小时区间高点 {hi}" if spike.get("dir") == "up" else f"跌破近 2 小时区间低点 {lo}"
+        qv = _qv(sym)
+        qbit = f"，24h 成交约 ${qv:,.0f}" if qv else ""
+        msgs.append(
+            f"📊 放量突破 {sym}（{direction}）\n"
+            f"5m 成交量为近端中位数的 {spike['ratio']:.1f} 倍，收 {fmt_price(close)} {level}（区间 {lo}–{hi}）{qbit}\n"
+            f"{chart_link(cfg, sym)}"
+        )
         mark(state, key)
-        news_n += 1
+        used.add(sym)
+        time.sleep(0.05)
+
+    # 重要新闻：优先走 Worker 评分（≥4），失败则用本地硬类别
+    news_room = max(0, min(2, max_total - len(msgs)))
+    if news_room:
+        news_cd = float(rd.get("news_cooldown_hours") or 24) * 60
+        for it in filter_news_for_push(fetch_news_items(), hours=24):
+            if news_room <= 0:
+                break
+            title = str(it.get("title") or "").strip()
+            url = str(it.get("url") or "").strip()
+            if not title or not url:
+                continue
+            sk = story_key(str(it.get("titleZh") or title)) or url.split("?")[0]
+            key = "news:" + sk[:180]
+            if cooled(state, key, news_cd):
+                continue
+            src = it.get("source") or "资讯"
+            zh_title = str(it.get("titleZh") or title).strip()
+            why = str(it.get("whyZh") or "").strip()
+            link = clean_news_url(url)
+            piece = f"📰 {zh_title}"
+            if why:
+                piece += f"\n为何影响价格：{why}"
+            piece += f"\n来源：{src}\n{link}"
+            msgs.append(piece)
+            mark(state, key)
+            news_room -= 1
     return msgs
 
 
@@ -816,10 +1000,11 @@ def run_poll(cfg, state, dry_run: bool) -> int:
     msgs = radar_messages(cfg, state, tickers, funding)
     if msgs:
         # 单轮最多 4 条，避免刷屏
-        body = "📡 观察台提醒\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer()
+        cap = int(cfg.get("max_alerts_per_run") or 3)
+        body = "📡 观察台提醒\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:cap]) + footer()
         send_telegram(token, chat, body, dry_run)
-        if len(msgs) > 4:
-            log(f"本轮另有 {len(msgs) - 4} 条因单轮上限未发出")
+        if len(msgs) > cap:
+            log(f"本轮另有 {len(msgs) - cap} 条因单轮上限未发出")
     else:
         log("本轮没有新的提醒（或仍在冷却中）")
     return 0
@@ -903,7 +1088,7 @@ def run_realtime(cfg, state, state_path: Path, dry_run: bool) -> int:
     def emit(msgs: List[str]) -> None:
         if not msgs:
             return
-        send_telegram(token, chat, "📡 观察台提醒（实时）\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer(), dry_run)
+        send_telegram(token, chat, "📡 观察台提醒（实时）\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:int(cfg.get("max_alerts_per_run") or 3)]) + footer(), dry_run)
         save_json(state_path, state)
 
     def on_spot(_ws, message: str) -> None:

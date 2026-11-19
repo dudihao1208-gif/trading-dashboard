@@ -89,8 +89,8 @@ async function soft<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try { return await fn(); } catch { return []; }
 }
 
-export async function collectNews(): Promise<NewsItem[]> {
-  const buckets: NewsItem[][] = await Promise.all([
+export async function collectNews(opts: { compact?: boolean } = {}): Promise<NewsItem[]> {
+  const tasks: Promise<NewsItem[]>[] = [
     soft(async () => {
       const raw = await fetchText("https://api-one-wscn.awtmt.com/apiv1/content/information-flow?channel=global-channel&limit=16", { Accept: "application/json" });
       const d = JSON.parse(raw) as { data?: { items?: { resource?: Record<string, unknown> }[] } };
@@ -143,11 +143,18 @@ export async function collectNews(): Promise<NewsItem[]> {
     soft(async () => parseRss(await fetchText("https://cointelegraph.com/rss"), "Cointelegraph").slice(0, 8)),
     soft(async () => parseRss(await fetchText("https://www.theblock.co/rss.xml"), "The Block").slice(0, 8)),
     soft(async () => parseRss(await fetchText("https://decrypt.co/feed"), "Decrypt").slice(0, 6)),
-    soft(async () => parseRss(await fetchText("https://www.jinse.cn/rss"), "金色财经").slice(0, 8)),
-    soft(async () => parseRss(await fetchText("https://www.odaily.news/rss/v1"), "Odaily").slice(0, 8)),
-    soft(async () => parseRss(await fetchText("https://www.theblockbeats.info/news/feed"), "BlockBeats").slice(0, 8)),
-    soft(async () => parseRss(await fetchText("https://rss.panewslab.com/zh/news/rss"), "PANews").slice(0, 8)),
-  ]);
+  ];
+  if (!opts.compact) {
+    tasks.push(
+      soft(async () => parseRss(await fetchText("https://www.jinse.cn/rss"), "金色财经").slice(0, 8)),
+      soft(async () => parseRss(await fetchText("https://www.odaily.news/rss/v1"), "Odaily").slice(0, 8)),
+      soft(async () => parseRss(await fetchText("https://www.theblockbeats.info/news/feed"), "BlockBeats").slice(0, 8)),
+      soft(async () => parseRss(await fetchText("https://rss.panewslab.com/zh/news/rss"), "PANews").slice(0, 8)),
+    );
+  }
+  // 精简模式跳过现场拉取币安 CMS（Cloudflare IP 常被拦；由 monitor.py 写入 KV 缓存）
+  if (opts.compact) tasks.splice(1, 1);
+  const buckets: NewsItem[][] = await Promise.all(tasks);
 
   const all = buckets.flat();
   const seen = new Set<string>();

@@ -5,6 +5,7 @@
  */
 import { collectNews, cleanUrl } from "./news";
 import { translateNews } from "./translate";
+import { evaluateNews } from "./score";
 import { getCalendar, getEquities, loadMonitorState, readLastRun, runScheduled, saveMonitorState, saveNewsCache, readAllNewsCaches, type LastRun } from "./monitor";
 
 export interface Env {
@@ -175,6 +176,51 @@ export default {
       const dry = url.searchParams.get("dry") === "1" || url.searchParams.get("dry") === "true";
       const run = await runScheduled(env, dry ? "manual-dry" : "manual", { dry });
       return json(run, req);
+    }
+
+    if (path === "/monitor/backfill" || path === "/monitor/filter-news") {
+      if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
+      const hours = Math.min(72, Math.max(1, Number(url.searchParams.get("hours") || 24) || 24));
+      let incoming: { title: string; url: string; source?: string; t?: number; important?: boolean; titleZh?: string; summaryZh?: string; excerpt?: string }[] = [];
+      if (req.method === "POST") {
+        try {
+          const body = await req.json() as { items?: typeof incoming; hours?: number };
+          if (Array.isArray(body.items)) incoming = body.items;
+        } catch { /* ignore */ }
+      }
+      const [live, cached] = await Promise.all([collectNews({ compact: true }), readAllNewsCaches(env)]);
+      const seen = new Set<string>();
+      const merged = [];
+      for (const it of [...incoming, ...live, ...cached]) {
+        if (!it?.title || !it?.url) continue;
+        const k = ((it.url || "").split("?")[0] || it.title || "").slice(0, 180);
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        merged.push(it);
+      }
+      const ev = await evaluateNews(env, merged, hours);
+      let translatedPass = ev.newPassed;
+      try { translatedPass = await translateNews(env, ev.newPassed) as typeof ev.newPassed; } catch { /* 原文 */ }
+      const slim = (it: (typeof ev.newPassed)[number] | (typeof ev.oldPassed)[number]) => ({
+        title: it.title,
+        titleZh: (it as { titleZh?: string }).titleZh || "",
+        source: it.source,
+        url: cleanUrl(it.url),
+        t: it.t || 0,
+        score: (it as { score?: number }).score,
+        whyZh: (it as { whyZh?: string }).whyZh || "",
+        via: (it as { via?: string }).via,
+        category: (it as { category?: string }).category,
+      });
+      return json({
+        hours,
+        collected: merged.filter((it) => !it.t || it.t >= Date.now() - hours * 3600_000).length,
+        oldCount: ev.oldPassed.length,
+        newCount: ev.newPassed.length,
+        oldTitles: ev.oldPassed.map((it) => ({ title: it.title, titleZh: it.titleZh || "", source: it.source, url: cleanUrl(it.url) })),
+        newTitles: translatedPass.map((it, i) => slim({ ...ev.newPassed[i], ...it })),
+        note: "对照为近 N 小时资讯：旧规则=关键词命中；新规则=评分≥4且故事去重。机会信号依赖当时量价与持仓快照，无法按历史回放。本接口不发 Telegram，不改 lastRun/冷却状态。",
+      }, req);
     }
 
     if (path === "/proxy") {

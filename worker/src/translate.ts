@@ -8,12 +8,12 @@ const TTL = 7 * 24 * 3600;
 const BATCH = 4;
 const MAX_NEW = 16;
 
-export function formatNewsTelegram(it: NewsItem): string {
+export function formatNewsTelegram(it: NewsItem & { whyZh?: string }): string {
   const title = (it.titleZh || it.title || "").trim();
-  const summary = (it.summaryZh || "").trim();
+  const why = (it.whyZh || "").trim();
   const url = cleanUrl(it.url || "");
   const lines = [`📰 ${title}`];
-  if (summary && summary !== title) lines.push(summary);
+  if (why) lines.push(`为何影响价格：${why}`);
   lines.push(`来源：${it.source || "资讯"}`);
   if (url) lines.push(url);
   return lines.join("\n");

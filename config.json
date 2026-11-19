@@ -10,24 +10,27 @@
   "price_alerts": [],
   "dashboard_url": "https://dudihao1208-gif.github.io/trading-dashboard/",
   "funding_abs_threshold": 0.001,
-  "volume_spike_ratio": 4.0,
+  "volume_spike_ratio": 5.0,
   "volume_interval": "5m",
   "volume_lookback": 24,
   "liquidation_alert_usd": 2000000,
-  "cooldown_minutes": 180,
+  "cooldown_minutes": 480,
   "calendar_impact": [
     "High"
   ],
   "prefer_official_binance": true,
   "radar": {
-    "oi_surge_pct": 8,
+    "oi_surge_pct": 10,
     "fng_extreme_low": 15,
     "fng_extreme_high": 85,
     "stock_premium_pct": 5,
     "watchlist_move_pct": 8,
     "watchlist_short_pct": 4,
     "fng_cooldown_hours": 24,
-    "premium_cooldown_hours": 12
+    "premium_cooldown_hours": 12,
+    "require_confluence": true
   },
-  "worker_url": "https://trading-dashboard-proxy.2770818829.workers.dev"
+  "worker_url": "https://trading-dashboard-proxy.2770818829.workers.dev",
+  "min_quote_volume": 50000000,
+  "max_alerts_per_run": 3
 }
