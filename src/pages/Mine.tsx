@@ -1,5 +1,6 @@
 import { useState } from "react";
 import ConnDiag from "../components/ConnDiag";
+import AlertsPanel from "../alerts/AlertsPanel";
 import { useStore } from "../lib/useStore";
 import { fmtDateTime, fmtPct, fmtPrice, chgClass, ageStamp } from "../lib/format";
 import { getState, patch, saveLS, toast, type AlertRule } from "../data/store";
@@ -16,7 +17,7 @@ export default function Mine() {
           <button key={k} className={sub === k ? "on btn" : "btn"} onClick={() => setSub(k)}>{l}</button>
         ))}
       </div>
-      {sub === "alert" && <AlertWizard />}
+      {sub === "alert" && (<><AlertsPanel /><AlertWizard /></>)}
       {sub === "stocks" && <Stocks />}
       {sub === "news" && <NewsCal />}
       {sub === "diag" && <ConnDiag />}
@@ -56,7 +57,7 @@ function AlertWizard() {
   return (
     <>
       <div className="card">
-        <div className="card-h"><h2>预警向导</h2><span className="stamp">大按钮按现价百分比</span></div>
+        <div className="card-h"><h2>本机自选快捷阈值</h2><span className="stamp">仅页面打开时有效，锁屏请用上方 Telegram 提醒</span></div>
         <div className="wizard">
           <div style={{ display: "flex", gap: 8 }}>
             <input className="inp" style={{ flex: 1 }} value={sym} onChange={(e) => setSym(e.target.value)} placeholder="BTC 或 BTCUSDT" />

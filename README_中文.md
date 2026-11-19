@@ -20,7 +20,7 @@
 
 ## Telegram 机会雷达
 
-主调度是 **Cloudflare Worker Cron**（每 10 分钟），去重/冷却状态存在 Cloudflare KV，不依赖 GitHub 的定时任务是否准时。GitHub Actions 里同名工作流仍保留作备份，并与 Worker 共享状态（需 `MONITOR_SECRET`）。GitHub `schedule` 在新仓库上经常长时间不触发，且即便触发也常有延迟，最短约 5 分钟，**不是实时**。
+主调度是 **Cloudflare Worker Cron**（价格提醒每 1 分钟，新闻与机会雷达每 10 分钟），去重/冷却状态存在 Cloudflare KV，不依赖 GitHub 的定时任务是否准时。GitHub Actions 里同名工作流仍保留作备份，并与 Worker 共享状态（需 `MONITOR_SECRET`）。GitHub `schedule` 在新仓库上经常长时间不触发，且即便触发也常有延迟，最短约 5 分钟，**不是实时**。
 
 页面「机会雷达」和 Telegram 都**不根据恐慌贪婪等情绪指数发信号**。
 
@@ -77,3 +77,11 @@ python monitor.py --test-ping   # 只发一条标明测试的连通消息
 - `config.json` / `config.example.json`：阈值（无密钥）
 - `worker/` + `wrangler.toml`：已部署的只读代理
 - `.github/workflows/`：Pages 构建、Monitor、刷新 public-data、Keepalive（防止 60 天停跑）
+
+
+## 图表均线、模拟盘与价格提醒
+
+- 图表会向回分页拉取足够的**真实**币安 K 线（通常 数百～上千根）再计算 EMA / MA / BOLL / MACD / ATR，不显示半成品估算值。新上线的期货（如 ANTUSDT 代币化股票永续）成交价历史可能很短，会改用更长的**标记价格** K 线，以便与币安 App 均线一致。最新一根随行情同步。
+- 期货 REST 优先走 `https://www.binance.com/fapi`（美国 IP 也可访问，且允许浏览器跨域）。官方 `fapi.binance.com` 在美国常返回 451，Worker 也不依赖它。现货 K 线仍用 `data-api.binance.vision`。
+- 「图表」页有**模拟盘**：开多/开空/平多/平空均需确认，不会用回车直接下单；预览阶段按交易所规则校验（最小名义额至少 100 USDT、步进、余额），不通过则按钮不可点。仓位展示保证金、强平价、未实现盈亏、ROE、资金费和手续费，并在图上标出开仓/止盈/止损/强平线。下单接口与实盘执行层分离，目前只实现模拟，不索取币安密钥。
+- 价格提醒可在「我的 → 预警」自由增删改（涨到/跌到/涨跌幅、一次或重复）。经 Telegram 配对码绑定后，存在 Worker KV，每 1 分钟用币安标记价检查并推送（罗马时间）。新闻与机会雷达规则不变：只推重大且 2 小时内的资讯。

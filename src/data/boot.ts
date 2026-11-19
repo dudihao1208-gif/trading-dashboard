@@ -12,9 +12,11 @@ export function applyRoute() {
   const q = new URLSearchParams(location.search);
   const tab = q.get("tab");
   const symbol = q.get("symbol");
+  const tf = q.get("tf");
   const p: Partial<ReturnType<typeof getState>> = {};
   if (tab) p.tab = tab;
   if (symbol) p.symbol = symbol.toUpperCase();
+  if (tf) p.tf = tf;
   if (Object.keys(p).length) patch(p);
 }
 

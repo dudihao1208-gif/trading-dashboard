@@ -170,7 +170,7 @@ async function refreshEquitiesKv(env: Env, extra: string[] = [], force = false) 
 export async function getCalendar(env: Env) { return refreshCalendarKv(env, false); }
 export async function getEquities(env: Env) { return refreshEquitiesKv(env, [], false); }
 
-async function sendTelegram(env: Env, text: string) {
+export async function sendTelegram(env: Env, text: string) {
   const token = env.TELEGRAM_BOT_TOKEN;
   const chat = env.TELEGRAM_CHAT_ID;
   if (!token || !chat) return false;

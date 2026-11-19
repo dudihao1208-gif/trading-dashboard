@@ -9,10 +9,10 @@ binding = "STATE"
 id = "63d5145a75be4795aa1e2b2f47ab4b52"
 
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["* * * * *", "*/10 * * * *"]
 
 # CORS 仅允许 https://dudihao1208-gif.github.io
-# 每 10 分钟 cron 跑机会雷达 + 刷新日历/正股缓存（状态存在 KV）
+# 每 1 分钟检查价格提醒（www.binance.com 标记价）；每 10 分钟跑机会雷达与新闻
 
 [ai]
 binding = "AI"

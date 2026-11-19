@@ -5,6 +5,7 @@
  */
 import { collectNews, cleanUrl, parseSourceTime, isReliablePublishTime, formatRome } from "./news";
 import { translateNews } from "./translate";
+import { handleAlerts, handleExchangeInfo, runAlertCron } from "./alerts";
 import { evaluateNews } from "./score";
 import { getCalendar, getEquities, loadMonitorState, readLastRun, runScheduled, saveMonitorState, saveNewsCache, readAllNewsCaches, type LastRun } from "./monitor";
 
@@ -20,6 +21,7 @@ const ALLOWED_ORIGINS = new Set(["https://dudihao1208-gif.github.io"]);
 
 const ALLOW = [
   "https://www.okx.com/api/v5/",
+  "https://www.binance.com/fapi/",
   "https://fapi.binance.com/",
   "https://api.binance.com/",
   "https://data-api.binance.vision/",
@@ -35,7 +37,7 @@ function corsHeaders(req: Request): Record<string, string> {
   if (ALLOWED_ORIGINS.has(origin)) {
     return {
       "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Monitor-Secret",
       Vary: "Origin",
     };
@@ -236,6 +238,23 @@ export default {
       }, req);
     }
 
+    if (path === "/exchangeInfo") {
+      const blocked = originBlocked(req);
+      if (blocked) return blocked;
+      const symbol = (url.searchParams.get("symbol") || "").toUpperCase();
+      try {
+        const data = await handleExchangeInfo(env, symbol);
+        return json(data, req);
+      } catch (e) {
+        return json({ error: e instanceof Error ? e.message : "exchangeInfo failed" }, req, 502);
+      }
+    }
+
+    if (path.startsWith("/alerts")) {
+      const r = await handleAlerts(req, env, path, url);
+      if (r) return r;
+    }
+
     if (path === "/proxy") {
       const blocked = originBlocked(req);
       if (blocked) return blocked;
@@ -255,7 +274,12 @@ export default {
     return json({ error: "not found" }, req, 404);
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    const cron = (event as { cron?: string }).cron || "";
+    if (cron === "* * * * *") {
+      ctx.waitUntil(runAlertCron(env).then((r) => console.log("alerts", r)));
+      return;
+    }
     ctx.waitUntil(runScheduled(env, "cron"));
   },
 };
