@@ -21,8 +21,8 @@ export default function Deriv() {
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
 
   const entries = Object.entries(st.funding)
-    .sort((a, b) => (b[1].oiUsd || 0) - (a[1].oiUsd || 0))
-    .slice(0, 60);
+    .filter(([s]) => s.endsWith("USDT"))
+    .sort((a, b) => (b[1].oiUsd || 0) - (a[1].oiUsd || 0) || Math.abs(b[1].rate) - Math.abs(a[1].rate));
   const maxAbs = Math.max(0.0003, ...entries.map(([, f]) => Math.abs(f.rate)));
 
   useEffect(() => {
@@ -49,7 +49,7 @@ export default function Deriv() {
           <h2>资金费率热力图</h2>
           <span className={"stamp" + (st.stamps.heat?.err ? " err" : "")}>{st.stamps.heat?.text || "—"}</span>
         </div>
-        <p className="hint">下一次普遍结算倒计时 {fmtCountdown((entries[0]?.[1].next || nextFundingTime()) - now)}（按本地时区换算）。颜色越深表示费率绝对值越大。点击可打开图表。</p>
+        <p className="hint">优先直连币安全市场资金费；若几秒内不可用则自动改用 OKX。下一次普遍结算倒计时 {fmtCountdown((entries[0]?.[1].next || nextFundingTime()) - now)}（本地时区）。颜色越深表示费率绝对值越大，点击打开图表。</p>
         <div className="heat">
           {entries.map(([sym, f]) => {
             const a = Math.min(1, Math.abs(f.rate) / maxAbs);
@@ -82,7 +82,7 @@ export default function Deriv() {
       <div className="card">
         <div className="card-h"><h2>爆仓流水</h2><span className={"stamp" + (st.fut.state === "down" ? " err" : "")}>{st.fut.label}</span></div>
         {st.fut.state !== "live" && (
-          <p className="hint">期货推送在部分地区不可用（例如美国 IP）。若你所在网络可连通币安期货，将在此实时显示。无法连通时不会假装「连接中」。</p>
+          <p className="hint">正在优先连接币安期货推送（全市场资金费与爆仓）。若几秒内没有数据（部分地区会被限制），自动改用 OKX，状态不会一直停在「连接中」。</p>
         )}
         <div className="table-wrap">
           <table className="data">

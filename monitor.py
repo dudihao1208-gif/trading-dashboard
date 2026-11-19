@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """交易观察台监控：GitHub Actions 轮询 或 --realtime WebSocket 常驻。
 
-机会雷达会把放量、极端资金费、持仓量骤升、恐慌贪婪极端、代币溢价、
-自选大波动推到 Telegram。所有提醒带冷却与去重。不是投资建议，不下单。
+Telegram 只推重要新闻（关键词过滤）和具体交易机会（放量突破、极端资金费、
+持仓量骤升且价格同步变动、代币溢价/折价扩大、自选大波动）。不推送恐慌贪婪等
+情绪指数。所有提醒带冷却、去重与单轮条数上限。不是投资建议，不下单。
 密钥只用环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，不要写进仓库。
 Worker 地址用环境变量 WORKER_URL 或 config 里的 worker_url（不是密钥）。
 """
@@ -54,9 +55,14 @@ def iso_utc(ts: Optional[float] = None) -> str:
 
 def fmt_local(ts: Optional[float] = None) -> str:
     try:
-        return datetime.fromtimestamp(ts or now_ts()).astimezone().strftime("%Y-%m-%d %H:%M:%S (%Z)")
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromtimestamp(ts or now_ts(), tz=ZoneInfo("Europe/Rome"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S (欧洲/Rome)")
     except Exception:
-        return iso_utc(ts)
+        try:
+            return datetime.fromtimestamp(ts or now_ts()).astimezone().strftime("%Y-%m-%d %H:%M:%S (%Z)")
+        except Exception:
+            return iso_utc(ts)
 
 
 def log(msg: str) -> None:
@@ -294,9 +300,18 @@ def volume_spike(symbol: str, ratio: float, interval: str, lookback: int) -> Opt
     if median <= 0:
         return None
     r = last / median
-    if r >= ratio:
-        return {"symbol": symbol, "ratio": r, "interval": interval}
-    return None
+    if r < ratio:
+        return None
+    candle = closed[-1]
+    try:
+        o, c = float(candle[1]), float(candle[4])
+        chg = ((c / o) - 1) * 100 if o else 0.0
+    except Exception:
+        o = c = chg = 0.0
+    # 放量突破：量能达标且该根有方向
+    if abs(chg) < 0.5:
+        return None
+    return {"symbol": symbol, "ratio": r, "interval": interval, "chg": chg, "close": c}
 
 
 def underlying_of(xsym: str) -> Optional[str]:
@@ -306,6 +321,78 @@ def underlying_of(xsym: str) -> Optional[str]:
     if u.endswith("X") and len(u) >= 3:
         return u[:-1]
     return None
+
+
+
+NEWS_KEYWORDS = [
+    "ETF", "SEC", "CFTC", "FOMC", "CPI", "PCE", "NFP", "Fed", "FED",
+    "美联储", "加息", "降息", "利率", "非农", "通胀", "监管", "制裁", "起诉", "立案",
+    "上币", "下架", "上线", "下线", "暂停充", "暂停提", "充提",
+    "黑客", "被盗", "盗币", "攻击", "漏洞", "hack", "exploit", "breach",
+    "listing", "delisting", "lawsuit", "approval", "approved",
+    "破产", "暴雷", "停牌", "冻结", "调查", "罚单", "罚款",
+    "现货ETF", "比特币ETF", "以太坊ETF",
+]
+_NEWS_RE = None
+
+
+def _news_regex():
+    global _NEWS_RE
+    if _NEWS_RE is None:
+        import re
+        parts = []
+        for k in NEWS_KEYWORDS:
+            if k.isascii() and k.isalpha() and len(k) <= 4:
+                parts.append(r"\b" + re.escape(k) + r"\b")
+            else:
+                parts.append(re.escape(k))
+        # 短词 rate / ban 易误伤，要求独立词
+        parts.extend([r"\brate(?:s| cut| hike)?\b", r"\bban(?:ned|s)?\b"])
+        _NEWS_RE = re.compile("|".join(parts), re.I)
+    return _NEWS_RE
+
+
+def is_major_headline(title: str) -> bool:
+    t = (title or "").strip()
+    if len(t) < 6:
+        return False
+    return bool(_news_regex().search(t))
+
+
+def news_summary(title: str, max_len: int = 80) -> str:
+    s = " ".join((title or "").split())
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def fetch_news_items() -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    if WORKER_URL:
+        data = _raw_get(WORKER_URL + "/news/zh", 15)
+        if isinstance(data, dict):
+            items.extend(data.get("items") or [])
+    if not items:
+        # Worker 不可用时，直连华尔街见闻公开接口
+        data = _raw_get(
+            "https://api-one-wscn.awtmt.com/apiv1/content/information-flow?channel=global-channel&limit=20",
+            15,
+        )
+        if isinstance(data, dict):
+            for it in ((data.get("data") or {}).get("items") or []):
+                r = it.get("resource") or {}
+                title = str(r.get("title") or r.get("content_short") or "").strip()
+                url = str(r.get("uri") or r.get("source_uri") or "").strip()
+                ts = r.get("display_time") or 0
+                try:
+                    ts = int(ts)
+                    if ts < 1e12:
+                        ts *= 1000
+                except Exception:
+                    ts = 0
+                if title and url:
+                    items.append({"title": title, "url": url, "source": "华尔街见闻", "t": ts})
+    return items
 
 
 def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding) -> List[str]:
@@ -349,8 +436,9 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
         key = f"{sym}:funding:{'pos' if rate > 0 else 'neg'}"
         if cooled(state, key, cooldown):
             continue
+        side = "多头付费" if rate > 0 else "空头付费"
         msgs.append(
-            f"💸 资金费率异常 {sym}\n当前 {(rate * 100):.4f}%（来源 {row.get('source')}，阈值 ±{th_f * 100:.3f}%）\n{chart_link(cfg, sym)}"
+            f"💸 资金费极端 {sym}\n资金费率 {(rate * 100):.4f}%（{side}，来源 {row.get('source')}，阈值 ±{th_f * 100:.3f}%）\n{chart_link(cfg, sym)}"
         )
         mark(state, key)
 
@@ -365,8 +453,11 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
         key = f"{sym}:volspike"
         if cooled(state, key, cooldown):
             continue
+        chg = spike.get("chg")
+        close = spike.get("close")
+        px = f"，收 {fmt_price(close)}，该根 {chg:+.2f}%" if close and chg is not None else ""
         msgs.append(
-            f"📊 放量异动 {sym}\n最近一根 {spike['interval']} K 线成交量约为中位数的 {spike['ratio']:.1f} 倍\n{chart_link(cfg, sym)}"
+            f"📊 放量突破 {sym}\n最近一根 {spike['interval']} 成交量约为中位数的 {spike['ratio']:.1f} 倍{px}\n{chart_link(cfg, sym)}"
         )
         mark(state, key)
         time.sleep(0.05)
@@ -385,33 +476,26 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
         chg = (oi / old - 1) * 100
         if abs(chg) < oi_th:
             continue
+        # 须同时有价格变动，避免无交易意义的空仓迁移
+        px_move = 0.0
+        try:
+            px_move = float((tickers.get(sym) or {}).get("priceChangePercent") or 0)
+        except (TypeError, ValueError):
+            px_move = 0.0
+        px_th = float(rd.get("oi_price_move_pct") or 1.5)
+        if abs(px_move) < px_th:
+            continue
         key = f"{sym}:oi:{'up' if chg > 0 else 'dn'}"
         if cooled(state, key, cooldown):
             continue
+        last = (tickers.get(sym) or {}).get("lastPrice")
+        pxbit = f"，现价 {fmt_price(float(last))}" if last else ""
         msgs.append(
-            f"📦 持仓量骤变 {sym}\n相对上次观察 {chg:+.1f}%（阈值 ±{oi_th:.0f}%），约 ${oi:,.0f}\n{chart_link(cfg, sym)}"
+            f"📦 持仓量骤变 {sym}\n持仓 {chg:+.1f}%（约 ${oi:,.0f}），同期 24h 价格 {px_move:+.2f}%{pxbit}\n{chart_link(cfg, sym)}"
         )
         mark(state, key)
 
-    # 恐慌贪婪
-    fng = http_get(FNG_URL)
-    try:
-        row = (fng or {}).get("data", [None])[0]
-        val = int(row["value"])
-        klass = row.get("value_classification") or ""
-        lo, hi = int(rd.get("fng_extreme_low") or 15), int(rd.get("fng_extreme_high") or 85)
-        hours = float(rd.get("fng_cooldown_hours") or 24)
-        if val <= lo or val >= hi:
-            key = f"fng:{'fear' if val <= lo else 'greed'}"
-            if not cooled(state, key, hours * 60):
-                msgs.append(
-                    f"🌡 恐慌贪婪极端：{val}（{klass}）\n只反映市场情绪，不代表方向。\n{chart_link(cfg, 'BTCUSDT')}"
-                )
-                mark(state, key)
-    except Exception:
-        pass
-
-    # 代币溢价
+    # 代币溢价 / 折价扩大
     prem_th = float(rd.get("stock_premium_pct") or 5)
     prem_cd = float(rd.get("premium_cooldown_hours") or 12) * 60
     eq_path = ROOT / "public-data" / "equities.json"
@@ -433,8 +517,10 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
                 key = f"prem:{sym}:{'hi' if prem > 0 else 'lo'}"
                 if cooled(state, key, prem_cd):
                     continue
+                kind = "溢价" if prem > 0 else "折价"
+                dash = str(cfg.get("dashboard_url") or "").rstrip("/") + "/?tab=mine"
                 msgs.append(
-                    f"🏷️ 代币溢价 {sym}\n相对正股 {u} {prem:+.2f}%（代币 {tok:.2f} / 正股 {float(q['price']):.2f}）\n{chart_link(cfg, 'BTCUSDT')}"
+                    f"🏷️ 代币{kind}扩大 {sym}\n相对正股 {u} {prem:+.2f}%（代币 {tok:.2f} / 正股 {float(q['price']):.2f}）\n{dash}"
                 )
                 mark(state, key)
             except Exception:
@@ -460,35 +546,30 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
         )
         mark(state, key)
 
-    # 宏观（未来 8 小时高影响，单轮最多 2 条）
-    impacts = set(cfg.get("calendar_impact") or ["High"])
-    cal = http_get(FF_CALENDAR)
-    if isinstance(cal, list):
-        now = datetime.now(timezone.utc)
-        horizon = now + timedelta(hours=8)
-        n = 0
-        for ev in cal:
-            if n >= 2:
-                break
-            try:
-                if (ev.get("impact") or "") not in impacts:
-                    continue
-                dt = datetime.fromisoformat(ev.get("date") or "")
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if not (now - timedelta(minutes=20) <= dt <= horizon):
-                    continue
-                key = f"cal:{ev.get('country')}:{ev.get('title')}:{ev.get('date')}"
-                if cooled(state, key, 360):
-                    continue
-                when = dt.astimezone().strftime("%m-%d %H:%M %Z")
-                msgs.append(
-                    f"📅 宏观即将公布：{ev.get('country') or ''} {ev.get('title')}（{ev.get('impact')}）\n时间 {when}  前值 {ev.get('previous') or '—'}  预测 {ev.get('forecast') or '—'}"
-                )
-                mark(state, key)
-                n += 1
-            except Exception:
-                continue
+    # 重要新闻（关键词过滤，最近 12 小时，单轮最多 2 条）
+    news_cd = float(rd.get("news_cooldown_hours") or 24) * 60
+    cutoff = now_ts() * 1000 - 12 * 3600 * 1000
+    news_n = 0
+    for it in fetch_news_items():
+        if news_n >= 2:
+            break
+        title = str(it.get("title") or "").strip()
+        url = str(it.get("url") or "").strip()
+        if not title or not url or not is_major_headline(title):
+            continue
+        try:
+            ts = float(it.get("t") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts and ts < cutoff:
+            continue
+        key = "news:" + (url.split("?")[0] or title)[:180]
+        if cooled(state, key, news_cd):
+            continue
+        src = it.get("source") or "资讯"
+        msgs.append(f"📰 {news_summary(title)}\n来源 {src}\n{url}")
+        mark(state, key)
+        news_n += 1
     return msgs
 
 
@@ -505,7 +586,7 @@ def run_poll(cfg, state, dry_run: bool) -> int:
     msgs = radar_messages(cfg, state, tickers, funding)
     if msgs:
         # 单轮最多 4 条，避免刷屏
-        body = "📡 机会雷达\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer()
+        body = "📡 观察台提醒\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer()
         send_telegram(token, chat, body, dry_run)
         if len(msgs) > 4:
             log(f"本轮另有 {len(msgs) - 4} 条因单轮上限未发出")
@@ -585,7 +666,7 @@ def run_realtime(cfg, state, state_path: Path, dry_run: bool) -> int:
     def emit(msgs: List[str]) -> None:
         if not msgs:
             return
-        send_telegram(token, chat, "📡 机会雷达（实时）\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer(), dry_run)
+        send_telegram(token, chat, "📡 观察台提醒（实时）\n" + fmt_local() + "\n\n" + "\n\n".join(msgs[:4]) + footer(), dry_run)
         save_json(state_path, state)
 
     def on_spot(_ws, message: str) -> None:

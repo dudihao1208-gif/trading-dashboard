@@ -57,25 +57,35 @@ export async function refreshMacro() {
   } catch { /* keep last */ }
 }
 
+function freshBinance(f?: Funding) {
+  return !!f && (f.source || "").includes("币安") && Date.now() - f.t < 120_000;
+}
+
 export async function refreshFunding() {
   const funding: Record<string, Funding> = { ...getState().funding };
-  let src = "";
-  // 1) 若有 Worker，试币安全市场资金费
-  if (workerOn()) {
+  let src = Object.values(funding).some(freshBinance) ? "币安" : "";
+
+  // 1) 浏览器直连币安期货 REST（意大利等地区通常可通；无 CORS / 451 则立刻放弃，不走美国 Worker）
+  if (!src) {
     try {
       const data = await getJSON<Array<{ symbol: string; lastFundingRate: string; markPrice: string; nextFundingTime: number }>>(
-        via(FAPI[0] + "/fapi/v1/premiumIndex"), 10000, false
+        FAPI[0] + "/fapi/v1/premiumIndex", 3500, false
       );
-      if (Array.isArray(data)) {
+      if (Array.isArray(data) && data.length) {
         for (const row of data) {
-          if (!row.symbol?.endsWith("USDT")) continue;
-          funding[row.symbol] = { rate: +row.lastFundingRate, source: "币安期货", t: Date.now(), mark: +row.markPrice, next: +row.nextFundingTime };
+          if (!row.symbol?.endsWith("USDT") || LEV_RE.test(row.symbol)) continue;
+          const prev = funding[row.symbol];
+          funding[row.symbol] = {
+            rate: +row.lastFundingRate, source: "币安", t: Date.now(),
+            mark: +row.markPrice, next: +row.nextFundingTime, oiUsd: prev?.oiUsd,
+          };
         }
-        src = "币安期货";
+        src = "币安";
       }
-    } catch { /* 地区限制则走 OKX */ }
+    } catch { /* 地区限制或无 CORS，几秒内改走 OKX */ }
   }
-  // 2) OKX 持仓量 + 对成交靠前的 USDT 永续拉资金费
+
+  // 2) OKX 持仓量；仅给尚无币安报价的合约补资金费
   try {
     const oi = await getJSON<{ code?: string; data?: { instId: string; oiUsd: string }[] }>(OKX + "/api/v5/public/open-interest?instType=SWAP", 12000);
     const rows = (oi.code === "0" ? oi.data : []) || [];
@@ -86,22 +96,25 @@ export async function refreshFunding() {
       .sort((a, b) => b.oiUsd - a.oiUsd);
     for (const x of usdt) map[x.instId] = { instId: x.instId, oiUsd: x.oiUsd };
     patch({ oi: map });
-    const need = usdt.filter((x) => !funding[x.sym]).slice(0, 60);
-    await mapPool(need, 8, async (x) => {
-      const data = await getJSON<{ code?: string; data?: { fundingRate: string; nextFundingTime?: string }[] }>(
-        `${OKX}/api/v5/public/funding-rate?instId=${x.instId}`, 8000
-      );
-      if (data.code === "0" && data.data?.[0]) {
-        funding[x.sym] = {
-          rate: +data.data[0].fundingRate,
-          source: "OKX",
-          t: Date.now(),
-          next: data.data[0].nextFundingTime ? +data.data[0].nextFundingTime : nextFundingTime(),
-          oiUsd: x.oiUsd,
-        };
-      }
-    });
-    if (!src) src = "OKX";
+    const need = usdt.filter((x) => !freshBinance(funding[x.sym])).slice(0, 60);
+    if (need.length) {
+      await mapPool(need, 8, async (x) => {
+        if (freshBinance(funding[x.sym])) return;
+        const data = await getJSON<{ code?: string; data?: { fundingRate: string; nextFundingTime?: string }[] }>(
+          `${OKX}/api/v5/public/funding-rate?instId=${x.instId}`, 8000
+        );
+        if (data.code === "0" && data.data?.[0]) {
+          funding[x.sym] = {
+            rate: +data.data[0].fundingRate,
+            source: "OKX",
+            t: Date.now(),
+            next: data.data[0].nextFundingTime ? +data.data[0].nextFundingTime : nextFundingTime(),
+            oiUsd: x.oiUsd,
+          };
+        }
+      });
+      if (!src) src = "OKX";
+    }
     for (const [sym, f] of Object.entries(funding)) {
       const inst = instOf(sym);
       if (map[inst] && f.oiUsd == null) f.oiUsd = map[inst].oiUsd;

@@ -1,4 +1,5 @@
-import { getState, patch, upsertTicker, SPOT_WS, FUT_WS, MAJORS, type LinkState } from "./store";
+import { getState, patch, upsertTicker, setStamp, SPOT_WS, FUT_WS, MAJORS, LEV_RE, type LinkState } from "./store";
+import { refreshFunding } from "./api";
 
 type Handlers = {
   onSpotLive?: () => void;
@@ -109,34 +110,67 @@ export function startSpotSocket(_h: Handlers = {}): SockCtl {
   );
 }
 
+function applyBinanceMarks(rows: Record<string, unknown>[]) {
+  const funding = { ...getState().funding };
+  let n = 0;
+  for (const d of rows) {
+    const s = String(d.s || "");
+    if (!s.endsWith("USDT") || LEV_RE.test(s)) continue;
+    if (d.r == null) continue;
+    const rate = +d.r;
+    if (!Number.isFinite(rate)) continue;
+    const prev = funding[s];
+    funding[s] = {
+      rate,
+      source: "币安",
+      t: Date.now(),
+      mark: d.p != null ? +d.p : prev?.mark,
+      next: d.T != null ? +d.T : prev?.next,
+      oiUsd: prev?.oiUsd,
+    };
+    n++;
+  }
+  if (!n) return;
+  patch({ funding });
+  setStamp("heat", `币安 · ${Object.keys(funding).filter((k) => k.endsWith("USDT")).length} 个永续`);
+}
+
 export function startFutSocket(): SockCtl {
-  const streams = ["!forceOrder@arr", ...MAJORS.map((s) => s.toLowerCase() + "@markPrice@1s")].join("/");
+  // 全市场资金费 + 爆仓 + 主要交易对单币流（意大利等非限制地区可直连）
+  const streams = [
+    "!markPrice@arr@1s",
+    "!forceOrder@arr",
+    ...MAJORS.map((s) => s.toLowerCase() + "@markPrice@1s"),
+  ].join("/");
   return connectWithTimeout(
     FUT_WS,
     (base) => base + streams,
     {
       name: "fut",
-      waitMs: 5000,
+      waitMs: 4000,
       silentMs: 25000,
-      labels: { live: "期货实时", down: "期货不可用", wait: "期货连接…" },
+      labels: { live: "币安", down: "期货不可用", wait: "期货连接…" },
       onMsg(payload) {
-        const d = (payload as { data?: Record<string, unknown> })?.data || payload as Record<string, unknown>;
-        if (!d) return;
+        const msg = payload as { stream?: string; data?: unknown };
+        const data = (msg.data !== undefined ? msg.data : payload) as unknown;
+        if (Array.isArray(data)) {
+          applyBinanceMarks(data as Record<string, unknown>[]);
+          return;
+        }
+        const d = (data || {}) as Record<string, unknown>;
         if (d.e === "forceOrder" && d.o) {
           const o = d.o as { s: string; S: string; ap?: string; p?: string; q?: string };
           const px = +(o.ap || o.p || 0);
           const rec = { t: +(d.E || Date.now()), s: o.s, side: o.S === "BUY" ? "空" : "多", px, usd: px * +(o.q || 0) };
-          const liqs = [rec, ...getState().liqs].slice(0, 80);
-          patch({ liqs });
-        } else if (d.r != null && d.s) {
-          const funding = { ...getState().funding };
-          funding[String(d.s)] = {
-            rate: +d.r, source: "币安期货推送", t: Date.now(),
-            mark: d.p != null ? +d.p : undefined,
-            next: d.T != null ? +d.T : undefined,
-            oiUsd: funding[String(d.s)]?.oiUsd,
-          };
-          patch({ funding });
+          patch({ liqs: [rec, ...getState().liqs].slice(0, 80) });
+        } else if (d.e === "markPriceUpdate" || (d.r != null && d.s)) {
+          applyBinanceMarks([d]);
+        }
+      },
+      onDown() {
+        const heat = getState().stamps.heat?.text || "";
+        if (!heat.startsWith("币安")) {
+          refreshFunding().catch(() => {});
         }
       },
     }
