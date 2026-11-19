@@ -1,0 +1,40 @@
+# 每 4 小时刷新网页同源的宏观日历和美股正股报价。
+# 源站（Forex Factory JSON、Yahoo Finance）没有浏览器 CORS，故由 Actions 代为拉取并提交。
+name: Refresh public data
+
+on:
+  schedule:
+    - cron: "20 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh public data
+        run: python monitor.py --write-public --config config.json
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public-data/calendar.json public-data/equities.json
+          if git diff --staged --quiet; then
+            echo "No public-data changes"
+          else
+            git commit -m "chore: refresh public-data (calendar, equities)"
+            git push
+          fi

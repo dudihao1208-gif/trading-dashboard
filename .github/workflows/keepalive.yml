@@ -1,0 +1,25 @@
+# GitHub 会在仓库 60 天无活动后停掉定时工作流。
+# 本工作流每周提交一次时间戳，保持 Actions 可用。
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Touch keepalive stamp
+        run: |
+          mkdir -p .github
+          date -u +"last keepalive (UTC): %Y-%m-%dT%H:%M:%SZ" > .github/keepalive.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive.txt
+          git commit -m "chore: weekly actions keepalive" || echo "nothing to commit"
+          git push || echo "nothing to push"

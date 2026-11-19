@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.monitor-state.json
+.env
+.env.*
+/etc-secrets
+*.log
+.DS_Store
+Thumbs.db
