@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-19T00:16:58Z",
+  "generated_at": "2026-11-19T07:03:45Z",
   "source": "https://query1.finance.yahoo.com",
   "quotes": {
     "AAPL": {
@@ -439,23 +439,11 @@
     },
     "SNDK": {
       "price": 776.22,
-      "change_percent": -20.606736286552994,
+      "change_percent": -2.636596257086943,
       "currency": "USD",
       "name": "Sandisk Corporation",
       "exchange": "NasdaqGS",
       "daily_closes": [
-        {
-          "t": 1794493800,
-          "c": 937.4600219726562
-        },
-        {
-          "t": 1794580200,
-          "c": 885.010009765625
-        },
-        {
-          "t": 1794839400,
-          "c": 809.1099853515625
-        },
         {
           "t": 1794925800,
           "c": 797.239990234375
