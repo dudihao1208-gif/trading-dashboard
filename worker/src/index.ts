@@ -17,7 +17,23 @@ export interface Env {
   MONITOR_SECRET?: string;
 }
 
-const ALLOWED_ORIGINS = new Set(["https://dudihao1208-gif.github.io"]);
+const ALLOWED_ORIGINS = new Set([
+  "https://dudihao1208-gif.github.io",
+  "https://tradelab-b7l.pages.dev",
+  "https://tradelab-preview.pages.dev",
+]);
+
+export function isAllowedOrigin(origin: string) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return origin.startsWith("https://") && host.endsWith(".tradelab-preview.pages.dev");
+  } catch {
+    return false;
+  }
+}
+
 
 const ALLOW = [
   "https://www.okx.com/api/v5/",
@@ -34,7 +50,7 @@ const UA = "Mozilla/5.0 (compatible; trading-dashboard-proxy/2.1)";
 
 function corsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") || "";
-  if (ALLOWED_ORIGINS.has(origin)) {
+  if (isAllowedOrigin(origin)) {
     return {
       "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -54,7 +70,7 @@ function json(data: unknown, req: Request, status = 200) {
 
 function originBlocked(req: Request): Response | null {
   const origin = req.headers.get("Origin");
-  if (origin && !ALLOWED_ORIGINS.has(origin)) {
+  if (origin && !isAllowedOrigin(origin)) {
     return json({ error: "origin not allowed" }, req, 403);
   }
   return null;

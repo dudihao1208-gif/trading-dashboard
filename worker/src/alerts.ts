@@ -1,4 +1,4 @@
-import type { Env } from "./index";
+import { isAllowedOrigin, type Env } from "./index";
 import { sendTelegram } from "./monitor";
 import { formatRome } from "./news";
 
@@ -45,10 +45,11 @@ export async function handleAlerts(req: Request, env: Env, path: string, url: UR
   if (!path.startsWith("/alerts")) return null;
   const out = (data: unknown, status = 200) => {
     const origin = req.headers.get("Origin") || "";
-    const allow = origin === "https://dudihao1208-gif.github.io" ? origin : "";
     const headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8" };
-    if (allow) {
-      headers["Access-Control-Allow-Origin"] = allow;
+    if (isAllowedOrigin(origin)) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+      headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
       headers.Vary = "Origin";
     }
     return new Response(JSON.stringify(data), { status, headers });
