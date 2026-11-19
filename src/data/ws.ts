@@ -1,5 +1,11 @@
 import { getState, patch, upsertTicker, setStamp, SPOT_WS, FUT_WS, MAJORS, LEV_RE, type LinkState } from "./store";
-import { refreshFunding } from "./api";
+import { refreshFunding, fetchDepth } from "./api";
+
+/** 合并流必须是 /stream?streams=a/b，不能接在 /ws 后面。 */
+function combinedStreamUrl(wsBase: string, streams: string) {
+  const origin = wsBase.replace(/\/ws\/?$/, "").replace(/\/stream\?streams=.*$/, "").replace(/\/$/, "");
+  return `${origin}/stream?streams=${streams}`;
+}
 
 type Handlers = {
   onSpotLive?: () => void;
@@ -179,11 +185,10 @@ export function startFutSocket(): SockCtl {
 
 export function startDepthSocket(symbol: string, onTrade?: (t: { t: number; p: number; q: number; m: boolean }) => void): SockCtl {
   const s = symbol.toLowerCase();
-  const path = `/${s}@depth20@100ms/${s}@aggTrade`;
   let tradesCtlIgnore = onTrade;
   return connectWithTimeout(
     SPOT_WS,
-    (base) => base.replace(/\/$/, "") + path,
+    (base) => combinedStreamUrl(base, `${s}@depth20@100ms/${s}@aggTrade`),
     {
       name: "spot",
       waitMs: 4000,
@@ -215,12 +220,18 @@ export function startDepthSocket(symbol: string, onTrade?: (t: { t: number; p: n
 
 // 盘口专用：不要覆盖主现货状态。单独实现轻量 socket。
 export function startBookTrades(symbol: string): SockCtl {
-  let sock: WebSocket | null = null, dead = false, timer: number | null = null, idx = 0;
+  let sock: WebSocket | null = null, dead = false, timer: number | null = null, idx = 0, poll: number | null = null;
   const s = symbol.toLowerCase();
+  const stampBook = (book: { bids: { p: number; q: number }[]; asks: { p: number; q: number }[] }) => {
+    patch({ book, bookAt: Date.now(), bookLive: true, bookSrc: "实时" });
+  };
+  const stampTrade = (tr: { t: number; p: number; q: number; m: boolean }) => {
+    patch({ trades: [tr, ...getState().trades].slice(0, 80), tradesAt: Date.now(), bookLive: true, bookSrc: getState().bookSrc || "实时" });
+  };
   const open = () => {
     if (dead) return;
-    const base = SPOT_WS[idx % SPOT_WS.length].replace(/\/$/, "");
-    const url = `${base}/stream?streams=${s}@depth20@100ms/${s}@aggTrade`;
+    const base = SPOT_WS[idx % SPOT_WS.length];
+    const url = combinedStreamUrl(base, `${s}@depth20@100ms/${s}@aggTrade`);
     try { sock = new WebSocket(url); } catch { idx++; timer = window.setTimeout(open, 1500); return; }
     const opened = Date.now();
     let got = 0;
@@ -230,23 +241,40 @@ export function startBookTrades(symbol: string): SockCtl {
       if (timer) { clearTimeout(timer); timer = window.setTimeout(() => sock?.close(), 15000); }
       try {
         const msg = JSON.parse(ev.data) as { stream?: string; data?: Record<string, unknown> };
-        const d = msg.data || {};
-        if (String(msg.stream || "").includes("depth")) {
+        const d = (msg.data || msg) as Record<string, unknown>;
+        const stream = String(msg.stream || "");
+        if (stream.includes("depth") || d.bids || d.asks || d.b || d.a) {
           const bids = ((d.bids || d.b) as string[][] || []).map(([p, q]) => ({ p: +p, q: +q }));
           const asks = ((d.asks || d.a) as string[][] || []).map(([p, q]) => ({ p: +p, q: +q }));
-          if (bids.length || asks.length) patch({ book: { bids, asks } });
-        } else if (String(msg.stream || "").includes("aggTrade")) {
-          const t = { t: +(d.T || d.E || Date.now()), p: +d.p!, q: +d.q!, m: !!d.m };
-          patch({ trades: [t, ...getState().trades].slice(0, 80) });
+          if (bids.length || asks.length) stampBook({ bids, asks });
+        } else if (stream.includes("aggTrade") || d.e === "aggTrade") {
+          stampTrade({ t: +(d.T || d.E || Date.now()), p: Number(d.p), q: Number(d.q), m: !!d.m });
         }
       } catch { /* */ }
     };
     sock.onclose = () => {
       if (dead) return;
+      if (getState().bookLive) patch({ bookLive: false });
       if (Date.now() - opened < 4000 && got === 0) idx++;
       timer = window.setTimeout(open, got ? 2000 : 2500);
     };
   };
   open();
-  return { close() { dead = true; if (timer) clearTimeout(timer); try { sock?.close(); } catch { /* */ } } };
+  const restTick = () => {
+    if (dead) return;
+    const st = getState();
+    if (!st.bookLive || Date.now() - st.bookAt > 4000) {
+      fetchDepth(symbol).catch(() => {});
+    }
+  };
+  poll = window.setInterval(restTick, 5000);
+  restTick();
+  return {
+    close() {
+      dead = true;
+      if (timer) clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      try { sock?.close(); } catch { /* */ }
+    },
+  };
 }

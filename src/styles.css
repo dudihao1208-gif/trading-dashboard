@@ -325,3 +325,11 @@ table.data .r { text-align: right; }
   background-size: 200% 100%; animation: sh 1.2s infinite; border-radius: 8px; height: 44px;
 }
 @keyframes sh { to { background-position: -200% 0; } }
+
+.worker-url-row { display: flex; flex-direction: column; gap: 8px; }
+.inp-url { width: 100%; max-width: 100%; font-size: 13px; }
+.break-all { word-break: break-all; overflow-wrap: anywhere; }
+@media (min-width: 720px) {
+  .worker-url-row { flex-direction: row; align-items: center; }
+  .worker-url-row .btn { flex: 0 0 auto; }
+}

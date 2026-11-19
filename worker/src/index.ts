@@ -1,8 +1,18 @@
 /**
- * 只读代理：为观察台解开无 CORS 的公开接口。
- * 严格白名单，拒绝任意 URL，避免变成开放代理。
+ * 只读代理 + 定时监控。
  * CORS 仅放行观察台 GitHub Pages 源。
+ * 去重状态存在 KV；cron 每 10 分钟跑机会雷达。
  */
+import { collectNews } from "./news";
+import { getCalendar, getEquities, loadMonitorState, readLastRun, runScheduled, saveMonitorState, saveNewsCache, readAllNewsCaches, type LastRun } from "./monitor";
+
+export interface Env {
+  STATE: KVNamespace;
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
+  MONITOR_SECRET?: string;
+}
+
 const ALLOWED_ORIGINS = new Set(["https://dudihao1208-gif.github.io"]);
 
 const ALLOW = [
@@ -15,20 +25,15 @@ const ALLOW = [
   "https://nfs.faireconomy.media/",
 ];
 
-const NEWS_FEEDS: { source: string; url: string }[] = [
-  { source: "金色财经", url: "https://www.jinse.cn/rss" },
-  { source: "Odaily", url: "https://www.odaily.news/rss/v1" },
-];
-
-const UA = "trading-dashboard-proxy/2.0";
+const UA = "Mozilla/5.0 (compatible; trading-dashboard-proxy/2.1)";
 
 function corsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") || "";
   if (ALLOWED_ORIGINS.has(origin)) {
     return {
       "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Monitor-Secret",
       Vary: "Origin",
     };
   }
@@ -60,139 +65,137 @@ function allowed(url: string) {
   }
 }
 
-function decodeXml(s: string) {
-  return s
-    .replace(/<!\[CDATA\[(.*?)\]\]>/gs, "$1")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim();
+function authorized(req: Request, env: Env): boolean {
+  const secret = env.MONITOR_SECRET || "";
+  if (!secret) return false;
+  const h = req.headers.get("Authorization") || "";
+  const bearer = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
+  const alt = req.headers.get("X-Monitor-Secret") || "";
+  return bearer === secret || alt === secret;
 }
 
-function parseRss(xml: string, source: string) {
-  const items: { title: string; url: string; source: string; t: number }[] = [];
-  const blocks = xml.split(/<item[\s>]/i).slice(1);
-  for (const b of blocks.slice(0, 20)) {
-    const titleRaw = (b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
-    const linkRaw = (b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1] || (b.match(/<link[^>]+href="([^"]+)"/i) || [])[1] || "";
-    const date = (b.match(/<pubDate[^>]*>([^<]+)/i) || [])[1];
-    const title = decodeXml(titleRaw);
-    const link = decodeXml(linkRaw);
-    const t = date ? Date.parse(date) : Date.now();
-    if (title && link) items.push({ title, url: link, source, t: Number.isFinite(t) ? t : Date.now() });
-  }
-  return items;
-}
-
-async function fetchText(url: string, headers: Record<string, string> = {}) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, ...headers } });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  return r.text();
-}
-
-async function collectNews(): Promise<{ title: string; url: string; source: string; t: number }[]> {
-  const all: { title: string; url: string; source: string; t: number }[] = [];
-
-  try {
-    const raw = await fetchText(
-      "https://api-one-wscn.awtmt.com/apiv1/content/information-flow?channel=global-channel&limit=20",
-      { Accept: "application/json" },
-    );
-    const d = JSON.parse(raw) as { data?: { items?: { resource?: Record<string, unknown> }[] } };
-    for (const it of d.data?.items || []) {
-      const r = it.resource || {};
-      const title = String(r.title || r.content_short || "").trim();
-      const url = String(r.uri || r.source_uri || "").trim();
-      const t = Number(r.display_time || 0);
-      if (title && url) all.push({ title, url, source: "华尔街见闻", t: t > 1e12 ? t : t * 1000 || Date.now() });
-    }
-  } catch { /* skip */ }
-
-  try {
-    const raw = await fetchText(
-      "https://www.binance.com/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=48&pageNo=1&pageSize=12",
-      { Accept: "application/json", lang: "zh-CN" },
-    );
-    const d = JSON.parse(raw) as { data?: { articles?: { title?: string; code?: string; releaseDate?: number }[] } };
-    for (const a of d.data?.articles || []) {
-      const title = String(a.title || "").trim();
-      const code = String(a.code || "").trim();
-      if (!title || !code) continue;
-      all.push({
-        title,
-        url: "https://www.binance.com/zh-CN/support/announcement/" + code,
-        source: "币安公告",
-        t: Number(a.releaseDate) || Date.now(),
-      });
-    }
-  } catch { /* skip */ }
-
-  for (const f of NEWS_FEEDS) {
-    try {
-      all.push(...parseRss(await fetchText(f.url), f.source));
-    } catch { /* skip feed */ }
-  }
-
-  const seen = new Set<string>();
-  const uniq = all.filter((x) => {
-    const k = x.title.replace(/\s+/g, "");
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
+async function proxy(url: string): Promise<Response> {
+  const r = await fetch(url, {
+    headers: { "User-Agent": UA, Accept: "application/json, text/plain, */*" },
   });
-  uniq.sort((a, b) => b.t - a.t);
-  const bySrc: Record<string, typeof uniq> = {};
-  for (const it of uniq) (bySrc[it.source] ||= []).push(it);
-  const mixed: typeof uniq = [];
-  const caps: Record<string, number> = { "华尔街见闻": 16, "币安公告": 10, "金色财经": 8, Odaily: 8 };
-  const used = new Set<string>();
-  for (const [src, cap] of Object.entries(caps)) {
-    for (const it of (bySrc[src] || []).slice(0, cap)) {
-      mixed.push(it);
-      used.add(it.title);
-    }
-  }
-  for (const it of uniq) if (!used.has(it.title)) mixed.push(it);
-  mixed.sort((a, b) => b.t - a.t);
-  return mixed.slice(0, 30);
+  const headers = new Headers();
+  const ct = r.headers.get("Content-Type");
+  if (ct) headers.set("Content-Type", ct);
+  return new Response(r.body, { status: r.status, headers });
 }
 
 export default {
-  async fetch(req: Request): Promise<Response> {
-    const url = new URL(req.url);
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method === "OPTIONS") {
-      const blocked = originBlocked(req);
-      if (blocked) return blocked;
       return new Response(null, { status: 204, headers: corsHeaders(req) });
     }
-    if (req.method !== "GET") return json({ error: "method not allowed" }, req, 405);
+    const url = new URL(req.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    const blocked = originBlocked(req);
-    if (blocked) return blocked;
-
-    if (url.pathname === "/health" || url.pathname === "/") {
-      return json({ ok: true, service: "trading-dashboard-proxy" }, req);
+    if (path === "/health") {
+      const last = await readLastRun(env);
+      return json({ ok: true, lastRun: last }, req);
     }
 
-    if (url.pathname === "/news/zh") {
-      return json({ items: await collectNews() }, req);
+    if (path === "/news/zh") {
+      const blocked = originBlocked(req);
+      if (blocked) return blocked;
+      try {
+        const [live, cached] = await Promise.all([collectNews(), readAllNewsCaches(env)]);
+        const seen = new Set<string>();
+        const items = [];
+        for (const it of [...live, ...cached].sort((a, b) => (b.t || 0) - (a.t || 0))) {
+          const k = ((it.url || "").split("?")[0] || it.title || "").slice(0, 180);
+          if (!k || seen.has(k)) continue;
+          seen.add(k);
+          items.push(it);
+        }
+        const sources: Record<string, number> = {};
+        for (const it of items) sources[it.source] = (sources[it.source] || 0) + 1;
+        return json({ items: items.slice(0, 50), sources, generated_at: new Date().toISOString() }, req);
+      } catch {
+        return json({ items: [], error: "news failed" }, req, 502);
+      }
     }
 
-    if (url.pathname === "/proxy") {
+    if (path === "/news/cache") {
+      if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
+      const body = await req.json() as { source?: string; items?: { title: string; url: string; source?: string; t?: number; important?: boolean }[] };
+      if (!body.source || !Array.isArray(body.items)) return json({ error: "bad body" }, req, 400);
+      const items = body.items.filter((x) => x.title && x.url).map((x) => ({
+        title: x.title, url: x.url, source: x.source || body.source!, t: x.t || Date.now(), important: x.important !== false,
+      }));
+      await saveNewsCache(env, body.source, items);
+      return json({ ok: true, n: items.length }, req);
+    }
+
+    if (path === "/calendar") {
+      const blocked = originBlocked(req);
+      if (blocked) return blocked;
+      const data = await getCalendar(env);
+      return json(data, req);
+    }
+
+    if (path === "/equities") {
+      const blocked = originBlocked(req);
+      if (blocked) return blocked;
+      const data = await getEquities(env);
+      return json(data, req);
+    }
+
+    if (path === "/monitor/status") {
+      // 公开：只返回上次定时运行摘要，不含密钥
+      const last = await readLastRun(env);
+      return json({ ok: true, lastRun: last }, req);
+    }
+
+    if (path === "/monitor/state") {
+      if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
+      if (req.method === "GET") {
+        const state = await loadMonitorState(env);
+        const last = await readLastRun(env);
+        return json({ ...state, lastRun: last }, req);
+      }
+      if (req.method === "PUT" || req.method === "POST") {
+        const body = await req.json() as { alerts?: Record<string, number>; oi_usd?: Record<string, number> };
+        const cur = await loadMonitorState(env);
+        const alerts = { ...cur.alerts, ...(body.alerts || {}) };
+        const oi = { ...cur.oi_usd, ...(body.oi_usd || {}) };
+        await saveMonitorState(env, { alerts, oi_usd: oi });
+        return json({ ok: true }, req);
+      }
+      return json({ error: "method" }, req, 405);
+    }
+
+    if (path === "/monitor/run") {
+      if (!authorized(req, env)) return json({ error: "unauthorized" }, req, 401);
+      const dry = url.searchParams.get("dry") === "1" || url.searchParams.get("dry") === "true";
+      const run = await runScheduled(env, dry ? "manual-dry" : "manual", { dry });
+      return json(run, req);
+    }
+
+    if (path === "/proxy") {
+      const blocked = originBlocked(req);
+      if (blocked) return blocked;
       const target = url.searchParams.get("url") || "";
       if (!allowed(target)) return json({ error: "url not allowed" }, req, 400);
-      const r = await fetch(target, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; " + UA + ")", Accept: "application/json, text/plain, */*" },
-      });
-      const body = await r.arrayBuffer();
-      const headers = new Headers(corsHeaders(req));
-      headers.set("Content-Type", r.headers.get("Content-Type") || "application/json");
-      headers.set("Cache-Control", "public, max-age=15");
-      return new Response(body, { status: r.status, headers });
+      try {
+        const r = await proxy(target);
+        const headers = new Headers(r.headers);
+        const cors = corsHeaders(req);
+        for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+        return new Response(r.body, { status: r.status, headers });
+      } catch {
+        return json({ error: "proxy failed" }, req, 502);
+      }
     }
 
     return json({ error: "not found" }, req, 404);
   },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runScheduled(env, "cron"));
+  },
 };
+
+export type { LastRun };

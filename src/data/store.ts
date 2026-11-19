@@ -61,7 +61,12 @@ export type AppState = {
   news: { title: string; url: string; source: string; t: number }[];
   newsNote: string;
   book: { bids: BookLevel[]; asks: BookLevel[] };
+  bookAt: number;
+  bookLive: boolean;
+  bookSrc: string;
   trades: Trade[];
+  tradesAt: number;
+  stocksAt: string;
   symbol: string;
   tf: string;
   tab: string;
@@ -115,7 +120,12 @@ let state: AppState = {
   news: [],
   newsNote: "",
   book: { bids: [], asks: [] },
+  bookAt: 0,
+  bookLive: false,
+  bookSrc: "",
   trades: [],
+  tradesAt: 0,
+  stocksAt: "",
   symbol: ls.symbol || "BTCUSDT",
   tf: ls.tf || "1h",
   tab: "market",

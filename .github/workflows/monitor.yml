@@ -1,15 +1,13 @@
-# 默认免费盯盘：约每 10 分钟跑一次。
-# 注意：GitHub 定时任务最短约 5 分钟，而且经常会延迟，不是实时。
-# 密钥请放在仓库 Settings → Secrets and variables → Actions：
-#   TELEGRAM_BOT_TOKEN
-#   TELEGRAM_CHAT_ID
-# 非密钥变量（Settings → Secrets and variables → Actions → Variables）：
-#   WORKER_URL   Cloudflare Worker 根地址，供期货/Yahoo/日历失败时走代理
+# 默认免费盯盘。GitHub cron 在新仓库上经常数小时不触发，因此主调度已改到
+# Cloudflare Worker Cron（每 10 分钟，状态存在 KV）。本工作流保留作备份，
+# 与 Worker 共享同一份去重状态（MONITOR_SECRET + WORKER_URL）。
+# 密钥：TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID、MONITOR_SECRET
+# 非密钥变量：WORKER_URL
 name: Trading Monitor
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "6-59/10 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -42,6 +40,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WORKER_URL: ${{ vars.WORKER_URL }}
+          MONITOR_SECRET: ${{ secrets.MONITOR_SECRET }}
         run: python monitor.py --config config.json --state .monitor-state.json
 
       - name: Save alert state

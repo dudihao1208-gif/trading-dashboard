@@ -1,6 +1,7 @@
+import { underlyingOf, sanePremium } from "./map";
 import {
   getJSON, firstOK, getState, patch, setStamp, upsertTicker, via, workerOn,
-  SPOT_REST, FAPI, OKX, FNG, CG_GLOBAL, CG_XSTOCKS, CG_DERIV, MAJORS, LEV_RE,
+  SPOT_REST, OKX, FNG, CG_GLOBAL, CG_XSTOCKS, CG_DERIV, MAJORS, LEV_RE,
   instOf, nextFundingTime, type Funding, type XStock, type BookLevel,
 } from "./store";
 
@@ -57,6 +58,17 @@ export async function refreshMacro() {
   } catch { /* keep last */ }
 }
 
+
+/** OKX：fundingTime 是本周期即将到来的结算；nextFundingTime 是再下一期。 */
+function okxFundingNext(row: { fundingTime?: string; nextFundingTime?: string }) {
+  const now = Date.now();
+  const ft = row.fundingTime ? +row.fundingTime : 0;
+  const nft = row.nextFundingTime ? +row.nextFundingTime : 0;
+  if (ft > now + 30_000) return ft;
+  if (nft > now + 30_000) return nft;
+  return nextFundingTime();
+}
+
 function freshBinance(f?: Funding) {
   return !!f && (f.source || "").includes("币安") && Date.now() - f.t < 120_000;
 }
@@ -65,25 +77,8 @@ export async function refreshFunding() {
   const funding: Record<string, Funding> = { ...getState().funding };
   let src = Object.values(funding).some(freshBinance) ? "币安" : "";
 
-  // 1) 浏览器直连币安期货 REST（意大利等地区通常可通；无 CORS / 451 则立刻放弃，不走美国 Worker）
-  if (!src) {
-    try {
-      const data = await getJSON<Array<{ symbol: string; lastFundingRate: string; markPrice: string; nextFundingTime: number }>>(
-        FAPI[0] + "/fapi/v1/premiumIndex", 3500, false
-      );
-      if (Array.isArray(data) && data.length) {
-        for (const row of data) {
-          if (!row.symbol?.endsWith("USDT") || LEV_RE.test(row.symbol)) continue;
-          const prev = funding[row.symbol];
-          funding[row.symbol] = {
-            rate: +row.lastFundingRate, source: "币安", t: Date.now(),
-            mark: +row.markPrice, next: +row.nextFundingTime, oiUsd: prev?.oiUsd,
-          };
-        }
-        src = "币安";
-      }
-    } catch { /* 地区限制或无 CORS，几秒内改走 OKX */ }
-  }
+  // 不在浏览器直连 fapi REST：即便在意大利也没有 CORS，只会在控制台刷红。
+  // 币安费率改由 fstream WebSocket（applyBinanceMarks）写入；此处用 OKX 补齐。
 
   // 2) OKX 持仓量；仅给尚无币安报价的合约补资金费
   try {
@@ -100,7 +95,7 @@ export async function refreshFunding() {
     if (need.length) {
       await mapPool(need, 8, async (x) => {
         if (freshBinance(funding[x.sym])) return;
-        const data = await getJSON<{ code?: string; data?: { fundingRate: string; nextFundingTime?: string }[] }>(
+        const data = await getJSON<{ code?: string; data?: { fundingRate: string; fundingTime?: string; nextFundingTime?: string }[] }>(
           `${OKX}/api/v5/public/funding-rate?instId=${x.instId}`, 8000
         );
         if (data.code === "0" && data.data?.[0]) {
@@ -108,7 +103,7 @@ export async function refreshFunding() {
             rate: +data.data[0].fundingRate,
             source: "OKX",
             t: Date.now(),
-            next: data.data[0].nextFundingTime ? +data.data[0].nextFundingTime : nextFundingTime(),
+            next: okxFundingNext(data.data[0]),
             oiUsd: x.oiUsd,
           };
         }
@@ -166,7 +161,8 @@ export async function fetchDepth(symbol: string) {
   );
   const bids: BookLevel[] = r.data.bids.map(([p, q]) => ({ p: +p, q: +q }));
   const asks: BookLevel[] = r.data.asks.map(([p, q]) => ({ p: +p, q: +q }));
-  patch({ book: { bids, asks } });
+  const live = getState().bookLive && Date.now() - getState().bookAt < 4000;
+  patch({ book: { bids, asks }, bookAt: Date.now(), bookSrc: live ? getState().bookSrc : "REST", bookLive: live });
   return r.base;
 }
 
@@ -193,29 +189,24 @@ export async function fetchRubik(kind: "oi" | "ls" | "taker", ccy: string): Prom
     }).filter((p) => p.t && Number.isFinite(p.a)).sort((x, y) => x.t - y.t);
     return pts;
   };
+  const tryWorkerFirst = workerOn();
   try {
-    const pts = await run(false);
-    return { ok: true, pts, note: "OKX" };
+    const pts = await run(tryWorkerFirst);
+    return { ok: true, pts, note: tryWorkerFirst ? "OKX · Worker" : "OKX" };
   } catch {
-    if (!workerOn()) {
-      return { ok: false, pts: [], note: "该数据需配置 Cloudflare Worker 代理（OKX 统计接口在浏览器中常被跨域拦截）" };
+    if (tryWorkerFirst) {
+      try {
+        const pts = await run(false);
+        return { ok: true, pts, note: "OKX" };
+      } catch {
+        return { ok: false, pts: [], note: "Worker 已配置但拉取失败" };
+      }
     }
-    try {
-      const pts = await run(true);
-      return { ok: true, pts, note: "OKX · Worker" };
-    } catch {
-      return { ok: false, pts: [], note: "Worker 已配置但拉取失败" };
-    }
+    return { ok: false, pts: [], note: "该数据需配置 Cloudflare Worker 代理（OKX 统计接口在浏览器中常被跨域拦截）" };
   }
 }
 
-const XSPECIAL: Record<string, string | null> = { SPCX: null, STRCX: null, CRCLX: "CRCL", SNDKX: "SNDK", SPYX: "SPY", QQQX: "QQQ", GOOGLX: "GOOGL" };
-export function underlyingOf(xsym: string): string | null {
-  const u = (xsym || "").toUpperCase();
-  if (u in XSPECIAL) return XSPECIAL[u] ?? null;
-  if (u.endsWith("X") && u.length >= 3) return u.slice(0, -1);
-  return null;
-}
+export { underlyingOf } from "./map";
 
 type EquityQuote = { price: number; change_percent: number | null; name?: string; daily_closes?: { t: number; c: number }[] };
 
@@ -275,49 +266,87 @@ export async function refreshStocks() {
       });
       if (need.some((s) => equities[s]?.price)) eqSrc = eqSrc ? eqSrc + " · Yahoo/Worker" : "Yahoo · Worker";
     }
+    // 先尝试 Worker 缓存的正股（Actions 日历未跑时也能用）
+    if (workerOn() && !Object.keys(equities).length) {
+      try {
+        const w = await getJSON<{ generated_at?: string; quotes?: Record<string, EquityQuote>; stale?: boolean }>(via("/equities"), 10000, false);
+        if (w.quotes && Object.keys(w.quotes).length) {
+          equities = w.quotes;
+          eqAt = w.generated_at || eqAt;
+          eqSrc = w.stale ? "Worker 缓存（可能过期）" : "Worker";
+        }
+      } catch { /* */ }
+    }
     const xstocks: XStock[] = (list || []).map((c) => {
       const u = underlyingOf(c.symbol);
       const eq = u ? equities[u] : undefined;
       let premium: number | null = null;
-      if (eq?.price && c.current_price) premium = (c.current_price / eq.price - 1) * 100;
+      let absurd = false;
+      if (eq?.price && c.current_price) {
+        const raw = (c.current_price / eq.price - 1) * 100;
+        premium = sanePremium(c.current_price, eq.price);
+        absurd = premium == null && Number.isFinite(raw);
+      }
       return {
         id: c.id, symbol: (c.symbol || "").toUpperCase(), name: c.name, price: c.current_price, chg: c.price_change_percentage_24h,
         under: eq?.price ? { symbol: u!, price: eq.price, chg: eq.change_percent, name: eq.name } : u ? { symbol: u, price: 0, chg: null } : undefined,
-        premium, corr: null, noUnder: u === null,
+        premium, corr: null, noUnder: u === null || absurd,
       };
     });
-    patch({ xstocks });
-    setStamp("stocks", "CoinGecko" + (eqSrc ? " · 正股 " + eqSrc : " · 正股待刷新"));
+    patch({ xstocks, stocksAt: eqAt || new Date().toISOString() });
+    setStamp("stocks", "CoinGecko" + (eqSrc ? " · 正股 " + eqSrc : " · 正股待刷新") + (eqAt ? " · " + eqAt : ""));
   } catch {
     setStamp("stocks", "代币列表加载失败", true);
   }
 }
 
+type AppCal = { title: string; country: string; date: string; impact: string; forecast: string; previous: string };
+
 export async function refreshCalendar() {
+  const apply = (events: AppCal[], at: string, label: string, stale = false) => {
+    patch({ calendar: events, calendarAt: at || new Date().toISOString() });
+    setStamp("cal", label + (stale ? " · 已过期" : ""), stale && !events.length);
+  };
+  const staleOf = (at?: string) => !!at && Date.now() - Date.parse(at) > 8 * 3600_000;
   try {
     const data = await getJSON<{ generated_at?: string; events?: AppCal[] }>("public-data/calendar.json", 8000);
-    if (data.events?.length) {
-      patch({ calendar: data.events, calendarAt: data.generated_at || "" });
-      setStamp("cal", data.generated_at ? "已同步宏观日历" : "日历已加载");
+    if (data.events?.length && !staleOf(data.generated_at)) {
+      apply(data.events, data.generated_at || "", "宏观日历 · 仓库");
       return;
     }
-  } catch { /* 再试 Worker */ }
+    // 仓库没有或已过期，再试 Worker 缓存（避免 Forex Factory 429）
+    if (workerOn()) {
+      try {
+        const w = await getJSON<{ generated_at?: string; events?: AppCal[]; stale?: boolean }>(via("/calendar"), 10000, false);
+        if (w.events?.length) {
+          apply(w.events, w.generated_at || "", w.stale ? "宏观日历 · Worker 缓存" : "宏观日历 · Worker", !!w.stale || staleOf(w.generated_at));
+          return;
+        }
+      } catch { /* 再试源站 */ }
+    }
+    if (data.events?.length) {
+      apply(data.events, data.generated_at || "", "宏观日历 · 仓库", true);
+      return;
+    }
+  } catch { /* 再试 Worker / 源站 */ }
   if (workerOn()) {
     try {
+      const w = await getJSON<{ generated_at?: string; events?: AppCal[]; stale?: boolean }>(via("/calendar"), 10000, false);
+      if (w.events?.length) {
+        apply(w.events, w.generated_at || "", w.stale ? "宏观日历 · Worker 缓存" : "宏观日历 · Worker", !!w.stale);
+        return;
+      }
       const evs = await getJSON<AppCal[]>(via("https://nfs.faireconomy.media/ff_calendar_thisweek.json"), 12000, false);
       const events = Array.isArray(evs) ? evs : [];
       if (events.length) {
-        patch({ calendar: events, calendarAt: new Date().toISOString() });
-        setStamp("cal", "宏观日历 · Worker");
+        apply(events, new Date().toISOString(), "宏观日历 · Worker");
         return;
       }
     } catch { /* fall through */ }
   }
   patch({ calendar: [], calendarAt: "" });
-  setStamp("cal", workerOn() ? "日历暂不可用" : "日历文件不可用", true);
+  setStamp("cal", workerOn() ? "日历暂不可用（源站可能限流）" : "日历文件不可用", true);
 }
-
-type AppCal = { title: string; country: string; date: string; impact: string; forecast: string; previous: string };
 
 export async function refreshNews() {
   // 有 Worker 时拉中文资讯 RSS；否则明确降级

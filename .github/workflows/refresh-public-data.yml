@@ -1,10 +1,10 @@
-# 每 4 小时刷新网页同源的宏观日历和美股正股报价。
+# 每 4 小时刷新网页同源的宏观日历和美股正股报价（备份；Worker 也会缓存同一数据）。
 # 源站（Forex Factory JSON、Yahoo Finance）没有浏览器 CORS，故由 Actions 代为拉取并提交。
 name: Refresh public data
 
 on:
   schedule:
-    - cron: "20 */4 * * *"
+    - cron: "23 */4 * * *"
   workflow_dispatch:
 
 jobs:

@@ -8,7 +8,7 @@ export default function Radar() {
     <div className="phone-pad">
       <div className="card">
         <div className="card-h"><h2>机会雷达</h2><span className="stamp">{st.signals.length} 条信号</span></div>
-        <p className="hint">根据实时行情自动扫描：多周期异动、放量、极端资金费、恐慌贪婪、代币溢价、自选大波动。这是观察信号，不是买卖建议，也不会自动下单。同样规则可由监控脚本推到 Telegram（需配置密钥，并有冷却防刷屏）。</p>
+        <p className="hint">本页扫描：多周期价格异动、放量、极端资金费、代币相对正股溢价/折价（超过 30% 视为异常映射并忽略）、自选 24h 大波动。不根据恐慌贪婪等情绪指数发信号。页面信号仅供观察，不是买卖建议，也不会自动下单。Telegram 推送更严：只发重要新闻（含币安上币/下架）和上述具体机会，带冷却与单轮条数上限，需配置仓库密钥或 Worker。</p>
         {st.signals.map((s) => (
           <div className={"signal" + (s.hot ? " hot" : "")} key={s.id} onClick={() => s.symbol && setRoute("chart", s.symbol.endsWith("USDT") ? s.symbol : st.symbol)}>
             <div className="title"><span className="tag">{s.kind}</span>{s.title}</div>

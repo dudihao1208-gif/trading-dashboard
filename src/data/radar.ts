@@ -27,7 +27,7 @@ function chgSince(sym: string, ms: number): number | null {
   return (last.c / best.p - 1) * 100;
 }
 
-/** 基于 miniTicker 快照的多周期异动 + 资金费 / 恐慌贪婪 / 溢价 / 自选 */
+/** 基于 miniTicker 快照的多周期异动 + 资金费 / 溢价 / 自选（不推送情绪指数） */
 export function scanRadar() {
   const st = getState();
   const uni = Object.keys(st.tickers).filter((s) => s.endsWith("USDT") && (st.tickers[s].q || 0) > 2_000_000);
@@ -97,21 +97,8 @@ export function scanRadar() {
     }
   }
 
-  const fng = st.macros.fng;
-  if (fng != null && (fng <= 15 || fng >= 85)) {
-    fire({
-      id: `fng:${fng <= 15 ? "fear" : "greed"}`,
-      kind: "情绪",
-      title: `恐慌贪婪指数 ${fng}（${st.macros.fngClass || (fng <= 15 ? "极度恐慌" : "极度贪婪")}）`,
-      detail: "情绪极端不代表方向，只作观察参考。",
-      symbol: "BTCUSDT",
-      hot: true,
-      t: Date.now(),
-    }, 24 * 3600 * 1000);
-  }
-
   for (const x of st.xstocks) {
-    if (x.premium == null || Math.abs(x.premium) < 5) continue;
+    if (x.noUnder || x.premium == null || Math.abs(x.premium) < 5 || Math.abs(x.premium) > 30) continue;
     fire({
       id: `prem:${x.symbol}:${x.premium > 0 ? "hi" : "lo"}`,
       kind: "溢价",

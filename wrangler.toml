@@ -4,6 +4,12 @@ compatibility_date = "2025-11-01"
 account_id = "83b65174dd816991d0a68bb33427bd03"
 workers_dev = true
 
-# 部署：npx wrangler deploy
-# 地址形如 https://trading-dashboard-proxy.<子域>.workers.dev
+[[kv_namespaces]]
+binding = "STATE"
+id = "63d5145a75be4795aa1e2b2f47ab4b52"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
 # CORS 仅允许 https://dudihao1208-gif.github.io
+# 每 10 分钟 cron 跑机会雷达 + 刷新日历/正股缓存（状态存在 KV）

@@ -7,10 +7,12 @@ Telegram 只推重要新闻（关键词过滤）和具体交易机会（放量�
 情绪指数。所有提醒带冷却、去重与单轮条数上限。不是投资建议，不下单。
 密钥只用环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，不要写进仓库。
 Worker 地址用环境变量 WORKER_URL 或 config 里的 worker_url（不是密钥）。
+去重状态优先与 Cloudflare KV 同步（MONITOR_SECRET）；Actions cache 仅作后备。
 """
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import os
 import sys
@@ -38,6 +40,19 @@ CG_XSTOCKS = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&cat
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 DEFAULT_EQUITY = ["AAPL", "NVDA", "TSLA", "GOOGL", "AMZN", "MSFT", "META", "SPY", "QQQ", "MSTR", "COIN", "INTC", "AMD", "CRCL", "SNDK", "PLTR"]
 XSPECIAL = {"SPCX": None, "STRCX": None, "CRCLX": "CRCL", "SNDKX": "SNDK", "SPYX": "SPY", "QQQX": "QQQ", "GOOGLX": "GOOGL"}
+KNOWN_UNDER = {
+    "AAPL","ABT","ADBE","AMD","AMZN","ARM","AVGO","AMC","BA","BABA","BAC","COIN",
+    "COST","CRM","CRCL","CRWD","DIS","GME","GOOG","GOOGL","GS","HD","HOOD","IBM",
+    "INTC","JNJ","JPM","KO","LLY","MA","META","MSFT","MSTR","MRVL","NFLX","NKE",
+    "NVDA","ORCL","PLTR","PYPL","QCOM","SHOP","SMCI","SNDK","TSM","TSLA","UNH",
+    "V","WMT","XOM","SPY","QQQ","IWM","DIA","VOO","IVV","TQQQ","SQQQ","SOXL",
+    "SOXS","QQQM",
+}
+PREMIUM_CAP = 30.0
+LEV_RE = re.compile(r"(UP|DOWN|BULL|BEAR|3L|3S|5L|5S)USDT$")
+MIN_QUOTE_VOL = 20_000_000
+SCAN_CAP = 40
+VOL_SCAN_CAP = 12
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "trading-dashboard-monitor/2.0", "Accept": "application/json"})
@@ -229,6 +244,86 @@ def footer() -> str:
     return "\n——\n仅供观察，不构成投资建议，不会自动交易。"
 
 
+
+def fetch_all_spot_tickers() -> List[Dict[str, Any]]:
+    data = spot_get("/api/v3/ticker/24hr")
+    return data if isinstance(data, list) else []
+
+
+def liquid_universe(cfg: Dict[str, Any], all_tickers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    cap = int(cfg.get("scan_cap") or SCAN_CAP)
+    min_q = float(cfg.get("min_quote_volume") or MIN_QUOTE_VOL)
+    watch = [s.upper() for s in (cfg.get("symbols") or [])]
+    ranked: List[Tuple[float, str]] = []
+    by: Dict[str, Dict[str, Any]] = {}
+    for row in all_tickers:
+        sym = row.get("symbol") or ""
+        if not sym.endswith("USDT") or LEV_RE.search(sym):
+            continue
+        try:
+            q = float(row.get("quoteVolume") or 0)
+        except (TypeError, ValueError):
+            q = 0.0
+        by[sym] = row
+        if q >= min_q:
+            ranked.append((q, sym))
+    ranked.sort(reverse=True)
+    out: Dict[str, Dict[str, Any]] = {}
+    for _, sym in ranked[:cap]:
+        out[sym] = by[sym]
+    for s in watch:
+        if s in by:
+            out[s] = by[s]
+    return out
+
+
+def merge_ts(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        try:
+            if k not in out or float(v) > float(out[k]):
+                out[k] = v
+        except (TypeError, ValueError):
+            out[k] = v
+    return out
+
+
+def pull_worker_state() -> Optional[Dict[str, Any]]:
+    secret = os.environ.get("MONITOR_SECRET") or ""
+    if not WORKER_URL or not secret:
+        return None
+    try:
+        r = SESSION.get(
+            WORKER_URL.rstrip("/") + "/monitor/state",
+            headers={"Authorization": "Bearer " + secret, "Accept": "application/json"},
+            timeout=12,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+        log(f"读取 Worker 状态 HTTP {r.status_code}")
+    except Exception as e:
+        log(f"读取 Worker 状态失败：{e}")
+    return None
+
+
+def push_worker_state(state: Dict[str, Any]) -> None:
+    secret = os.environ.get("MONITOR_SECRET") or ""
+    if not WORKER_URL or not secret:
+        return
+    try:
+        r = SESSION.put(
+            WORKER_URL.rstrip("/") + "/monitor/state",
+            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"},
+            json={"alerts": state.get("alerts") or {}, "oi_usd": state.get("oi_usd") or {}},
+            timeout=12,
+        )
+        if r.status_code >= 300:
+            log(f"写入 Worker 状态 HTTP {r.status_code}")
+    except Exception as e:
+        log(f"写入 Worker 状态失败：{e}")
+
+
 def fetch_tickers(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     data = spot_get("/api/v3/ticker/24hr")
@@ -248,6 +343,27 @@ def fetch_tickers(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
 
 def fetch_funding(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
+    # 先拿全市场 OKX 持仓，把头部流动永续并进扫描列表
+    oi_all = okx_get("/api/v5/public/open-interest?instType=SWAP")
+    extra: List[str] = []
+    if isinstance(oi_all, list):
+        rows = []
+        for x in oi_all:
+            inst = x.get("instId") or ""
+            if inst.endswith("-USDT-SWAP"):
+                try:
+                    rows.append((float(x.get("oiUsd") or 0), inst.replace("-USDT-SWAP", "USDT")))
+                except (TypeError, ValueError):
+                    pass
+        rows.sort(reverse=True)
+        extra = [s for _, s in rows[:SCAN_CAP]]
+    want = []
+    seen = set()
+    for s in list(symbols) + extra:
+        if s and s not in seen:
+            seen.add(s)
+            want.append(s)
+    symbols = want[: max(SCAN_CAP, len(symbols))]
     prem = fapi_get("/fapi/v1/premiumIndex")
     if isinstance(prem, list):
         for row in prem:
@@ -268,7 +384,7 @@ def fetch_funding(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
             except Exception:
                 pass
         time.sleep(0.08)
-    oi_all = okx_get("/api/v5/public/open-interest?instType=SWAP")
+    # oi_all 已在函数开头拉取
     if isinstance(oi_all, list):
         by = {x.get("instId"): x for x in oi_all}
         for sym, row in result.items():
@@ -315,11 +431,16 @@ def volume_spike(symbol: str, ratio: float, interval: str, lookback: int) -> Opt
 
 
 def underlying_of(xsym: str) -> Optional[str]:
-    u = (xsym or "").upper()
+    u = re.sub(r"[^A-Z0-9.]", "", (xsym or "").upper())
+    if not u:
+        return None
     if u in XSPECIAL:
         return XSPECIAL[u]
-    if u.endswith("X") and len(u) >= 3:
-        return u[:-1]
+    core = u[:-1] if u.endswith("X") and len(u) >= 3 else u
+    if core.startswith("W") and len(core) >= 3 and core[1:] in KNOWN_UNDER:
+        core = core[1:]
+    if core in KNOWN_UNDER:
+        return core
     return None
 
 
@@ -327,9 +448,9 @@ def underlying_of(xsym: str) -> Optional[str]:
 NEWS_KEYWORDS = [
     "ETF", "SEC", "CFTC", "FOMC", "CPI", "PCE", "NFP", "Fed", "FED",
     "美联储", "加息", "降息", "利率", "非农", "通胀", "监管", "制裁", "起诉", "立案",
-    "上币", "下架", "上线", "下线", "暂停充", "暂停提", "充提",
+    "上币", "下架", "上线", "下线", "暂停充", "暂停提", "充提", "上市", "新币", "新上",
     "黑客", "被盗", "盗币", "攻击", "漏洞", "hack", "exploit", "breach",
-    "listing", "delisting", "lawsuit", "approval", "approved",
+    "listing", "delisting", "lawsuit", "approval", "approved", "Will List", "Will Delist", "New Listing", "opens trading",
     "破产", "暴雷", "停牌", "冻结", "调查", "罚单", "罚款",
     "现货ETF", "比特币ETF", "以太坊ETF",
 ]
@@ -366,10 +487,80 @@ def news_summary(title: str, max_len: int = 80) -> str:
     return s[: max_len - 1] + "…"
 
 
+
+def fetch_binance_announcements() -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    hosts = ["https://www.binance.info", "https://www.binance.com"]
+    paths = [
+        "/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=48&pageNo=1&pageSize=8",
+        "/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=49&pageNo=1&pageSize=8",
+        "/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=161&pageNo=1&pageSize=8",
+        "/bapi/composite/v1/public/cms/article/list/query?type=1&pageNo=1&pageSize=10",
+    ]
+    for host in hosts:
+        got = 0
+        for path in paths:
+            data = _raw_get(host + path, 12)
+            arts: List[Dict[str, Any]] = []
+            if isinstance(data, dict):
+                d = data.get("data") or {}
+                if isinstance(d.get("articles"), list):
+                    arts.extend(d["articles"])
+                for cat in d.get("catalogs") or []:
+                    if isinstance(cat, dict) and isinstance(cat.get("articles"), list):
+                        arts.extend(cat["articles"])
+            for a in arts:
+                title = str(a.get("title") or "").strip()
+                code = str(a.get("code") or "").strip()
+                if not title:
+                    continue
+                url = f"https://www.binance.com/zh-CN/support/announcement/{code}" if code else "https://www.binance.com/zh-CN/support/announcement"
+                try:
+                    ts = float(a.get("releaseDate") or 0)
+                except (TypeError, ValueError):
+                    ts = 0
+                items.append({"title": title, "url": url, "source": "币安公告", "t": ts or (now_ts() * 1000), "important": True})
+                got += 1
+        if got:
+            break
+    # unique
+    seen = set()
+    uniq = []
+    for it in items:
+        if it["title"] in seen:
+            continue
+        seen.add(it["title"])
+        uniq.append(it)
+    return uniq[:12]
+
+
+def push_news_cache(source: str, items: List[Dict[str, Any]]) -> None:
+    secret = os.environ.get("MONITOR_SECRET") or ""
+    if not WORKER_URL or not secret or not items:
+        return
+    try:
+        r = SESSION.post(
+            WORKER_URL.rstrip("/") + "/news/cache",
+            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"},
+            json={"source": source, "items": items},
+            timeout=12,
+        )
+        if r.status_code >= 300:
+            log(f"写入新闻缓存 HTTP {r.status_code}")
+        else:
+            log(f"已把 {len(items)} 条{source}写入 Worker 缓存")
+    except Exception as e:
+        log(f"写入新闻缓存失败：{e}")
+
+
 def fetch_news_items() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    bn = fetch_binance_announcements()
+    if bn:
+        items.extend(bn)
+        push_news_cache("币安公告", bn)
     if WORKER_URL:
-        data = _raw_get(WORKER_URL + "/news/zh", 15)
+        data = _raw_get(WORKER_URL.rstrip("/") + "/news/zh", 15)
         if isinstance(data, dict):
             items.extend(data.get("items") or [])
     if not items:
@@ -400,6 +591,14 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
     cooldown = float(cfg.get("cooldown_minutes") or 180)
     msgs: List[str] = []
     symbols = [s.upper() for s in (cfg.get("symbols") or [])]
+    # 放量扫描：流动永续（传入的 tickers 已按成交额截断）优先，上限防止过慢
+    vol_syms = list(tickers.keys())
+    def _qv(sym: str) -> float:
+        try:
+            return float((tickers.get(sym) or {}).get("quoteVolume") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    vol_syms = sorted(set(vol_syms) | set(symbols), key=_qv, reverse=True)[: int(cfg.get("volume_scan_cap") or VOL_SCAN_CAP)]
 
     # 价格突破（仅在用户明确配置了阈值时）
     for a in cfg.get("price_alerts") or []:
@@ -446,7 +645,7 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
     ratio = float(cfg.get("volume_spike_ratio") or 4.0)
     interval = str(cfg.get("volume_interval") or "5m")
     lookback = int(cfg.get("volume_lookback") or 24)
-    for sym in symbols:
+    for sym in vol_syms:
         spike = volume_spike(sym, ratio, interval, lookback)
         if not spike:
             continue
@@ -512,7 +711,7 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
                 if not q or not q.get("price"):
                     continue
                 prem = (tok / float(q["price"]) - 1) * 100
-                if abs(prem) < prem_th:
+                if abs(prem) < prem_th or abs(prem) > PREMIUM_CAP:
                     continue
                 key = f"prem:{sym}:{'hi' if prem > 0 else 'lo'}"
                 if cooled(state, key, prem_cd):
@@ -555,7 +754,9 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
             break
         title = str(it.get("title") or "").strip()
         url = str(it.get("url") or "").strip()
-        if not title or not url or not is_major_headline(title):
+        if not title or not url:
+            continue
+        if not (it.get("important") or is_major_headline(title)):
             continue
         try:
             ts = float(it.get("t") or 0)
@@ -574,13 +775,19 @@ def radar_messages(cfg: Dict[str, Any], state: Dict[str, Any], tickers, funding)
 
 
 def run_poll(cfg, state, dry_run: bool) -> int:
-    symbols = [s.upper() for s in (cfg.get("symbols") or [])]
+    watch = [s.upper() for s in (cfg.get("symbols") or [])]
     token, chat = telegram_creds(cfg)
-    log(f"轮询开始，关注 {', '.join(symbols)}")
-    tickers = fetch_tickers(symbols)
-    for s, t in tickers.items():
-        log(f"  {s}  {t.get('lastPrice')}  24h {t.get('priceChangePercent')}%")
-    funding = fetch_funding(symbols)
+    all_tickers = fetch_all_spot_tickers()
+    tickers = liquid_universe(cfg, all_tickers)
+    if not tickers:
+        tickers = fetch_tickers(watch)
+    scan = list(tickers.keys())
+    log(f"轮询开始，扫描 {len(scan)} 个流动 USDT 交易对（自选 {', '.join(watch) or '无'}）")
+    for s in watch:
+        tkr = tickers.get(s)
+        if tkr:
+            log(f"  {s}  {tkr.get('lastPrice')}  24h {tkr.get('priceChangePercent')}%")
+    funding = fetch_funding(scan)
     for s, f in funding.items():
         log(f"  资金费 {s} {f.get('rate')} ({f.get('source')})")
     msgs = radar_messages(cfg, state, tickers, funding)
@@ -601,7 +808,14 @@ def write_public(cfg) -> int:
     cal_path.parent.mkdir(parents=True, exist_ok=True)
     cal = http_get(FF_CALENDAR)
     events = cal if isinstance(cal, list) else []
-    save_json(cal_path, {"generated_at": iso_utc(), "source": FF_CALENDAR, "events": events})
+    src = FF_CALENDAR
+    if not events and WORKER_URL:
+        wcal = _raw_get(WORKER_URL.rstrip("/") + "/calendar", 12)
+        if isinstance(wcal, dict) and isinstance(wcal.get("events"), list) and wcal["events"]:
+            events = wcal["events"]
+            src = "worker-cache"
+            log("Forex Factory 失败，改用 Worker 日历缓存")
+    save_json(cal_path, {"generated_at": iso_utc(), "source": src, "events": events, "stale": src == "worker-cache"})
     log(f"已写入日历 {len(events)} 条")
     quotes: Dict[str, Any] = {}
     for sym in cfg.get("equity_tickers") or DEFAULT_EQUITY:
@@ -809,6 +1023,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     state = load_json(state_path, {"alerts": {}})
     if not isinstance(state, dict):
         state = {"alerts": {}}
+    remote = None if (args.test_ping or args.write_public) else pull_worker_state()
+    if remote:
+        state["alerts"] = merge_ts(state.get("alerts"), remote.get("alerts"))
+        state["oi_usd"] = merge_ts(state.get("oi_usd"), remote.get("oi_usd"))
+        last = remote.get("lastRun") or {}
+        if last.get("at"):
+            log(f"已合并 Worker 状态（上次 {last.get('atRome') or last.get('at')}，trigger={last.get('trigger')}）")
     try:
         if args.test_ping:
             return test_ping(cfg, args.dry_run)
@@ -818,11 +1039,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             return run_realtime(cfg, state, state_path, args.dry_run)
         rc = run_poll(cfg, state, args.dry_run)
         save_json(state_path, state)
+        push_worker_state(state)
         return rc
     except Exception:
         log("未处理异常：\n" + traceback.format_exc())
         try:
             save_json(state_path, state)
+            push_worker_state(state)
         except Exception:
             pass
         return 1

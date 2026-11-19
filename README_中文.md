@@ -18,38 +18,22 @@
 
 ---
 
-## Telegram 机会雷达（默认免费：GitHub Actions）
+## Telegram 机会雷达
 
-仓库 Settings → Secrets 中配置：
+主调度是 **Cloudflare Worker Cron**（每 10 分钟），去重/冷却状态存在 Cloudflare KV，不依赖 GitHub 的定时任务是否准时。GitHub Actions 里同名工作流仍保留作备份，并与 Worker 共享状态（需 `MONITOR_SECRET`）。GitHub `schedule` 在新仓库上经常长时间不触发，且即便触发也常有延迟，最短约 5 分钟，**不是实时**。
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
+页面「机会雷达」和 Telegram 都**不根据恐慌贪婪等情绪指数发信号**。
 
-工作流 **Trading Monitor** 约每 10 分钟轮询一次（GitHub 定时任务经常会延迟，不是实时）。命中下列条件且通过冷却后，会推一条中文说明，并带图表链接：
+Telegram 只推：
 
-- 自选大波动、放量、极端资金费率
-- 持仓量相对上次观察骤变
-- 恐慌贪婪极端
-- 代币化美股相对正股溢价/折价走阔
-- 即将公布的高影响宏观数据
-- 你在 `config.json` 里填写的价格上下限（默认为空，避免无意义刷屏）
+- 重要新闻（关键词过滤，含币安上币/下架公告；最近 12 小时，24 小时冷却，单轮最多 2 条）
+- 流动 USDT 永续上的具体机会：放量突破、极端资金费率、持仓量骤升且价格同步变动（不限于自选，有成交额/数量上限）
+- 自选 24h 大波动
+- 代币化美股相对已映射正股的溢价/折价走阔（未映射或溢价绝对值超过 30% 的视为异常，不推送）
 
-单轮最多 4 条；同类信号有 3 小时（情绪 24 小时、溢价 12 小时）冷却。阈值在 `config.json` 的 `radar` 段，**不要把密钥写进这个文件**。
+单轮最多 4 条；同类机会默认 3 小时冷却（溢价 12 小时、新闻 24 小时）。阈值在 `config.json` 的 `radar` 段，**不要把密钥写进这个文件**。密钥只用环境变量或 Wrangler / Actions Secrets。
 
-第一次手动跑：Actions → Trading Monitor → Run workflow。
-
-**真正实时**：在非美国区域的云主机上：
-
-```bash
-git clone https://github.com/dudihao1208-gif/trading-dashboard.git
-sudo bash trading-dashboard/install.sh
-# 编辑 /etc/trading-dashboard/env 填入 Telegram 密钥后
-sudo systemctl restart trading-monitor
-```
-
-请把云主机建在法兰克福 / 东京 / 新加坡等区域。币安主站在美国 IP 上常返回 451。
-
----
+状态查询（公开，无密钥）：`https://trading-dashboard-proxy.2770818829.workers.dev/monitor/status`
 
 ## Cloudflare Worker（已默认接入）
 
@@ -59,7 +43,7 @@ sudo systemctl restart trading-monitor
 
 CORS 仅允许 `https://dudihao1208-gif.github.io`。一般不用改地址；若要换代理或清空降级，可在「我的 → 设置」覆盖。
 
-默认解锁：持仓量历史、多空比、主动买入量、中文资讯、正股 Yahoo 报价（public-data 缺失时）。宏观日历优先读仓库 `public-data`，必要时再走 Worker。资金费热力图仍以 OKX（及 CoinGecko 补足）为主——币安期货接口从 Worker 所在网络常被拦截。
+默认解锁：持仓量历史、多空比、主动买入量、加密资讯（币安公告、华尔街见闻、CoinDesk / The Block / Cointelegraph 等，中文源能通的一并纳入）、正股 Yahoo 报价、宏观日历缓存（Forex Factory 限流时继续返回上次成功的数据并标过期）。Worker 同时每 10 分钟跑机会雷达并给 Telegram 推送。资金费热力图：浏览器优先用币安期货 WebSocket（意大利等地区）；美国 IP 或推送失败时改走 OKX / CoinGecko。币安期货 REST 从 Worker 所在网络常被拦截，页面不再用浏览器直连 fapi（避免控制台报错）。
 
 Worker 只代理白名单里的公开只读接口，不是开放代理。源码在 `worker/src/index.ts`。监控脚本可通过非密钥环境变量或配置项 `WORKER_URL` / `worker_url` 在直连失败时走同一代理。
 
@@ -83,7 +67,7 @@ python monitor.py --test-ping   # 只发一条标明测试的连通消息
 
 ## 数据与地区限制
 
-现货优先使用 `data-api.binance.vision` / `data-stream.binance.vision`（美国 IP 也可跨域）。官方 `api.binance.com` 仅作后备。期货推送在部分地区不可用，界面会显示「期货不可用」，不会一直停在「连接中」。资金费、持仓量等会改走 OKX 或 CoinGecko。宏观日历和美股正股由 Actions 写入 `public-data/`（源站无浏览器 CORS）。
+现货优先使用 `data-api.binance.vision` / `data-stream.binance.vision`（美国 IP 也可跨域）。官方 `api.binance.com` 仅作后备。期货推送在部分地区不可用，界面会显示「期货不可用」，不会一直停在「连接中」。资金费、持仓量等会改走 OKX 或 CoinGecko。宏观日历和美股正股由 Worker 缓存，并尽量由 Actions 写入 `public-data/`（源站无浏览器 CORS）。日历/正股/盘口会显示「更新于 / 已过期」。
 
 ---
 

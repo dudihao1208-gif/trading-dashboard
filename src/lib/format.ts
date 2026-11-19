@@ -88,3 +88,12 @@ export function normalizeSym(s: string): string {
   if (!/(USDT|USDC|BUSD)$/.test(s)) s += "USDT";
   return s;
 }
+
+/** 更新时间戳；超过 freshMs 则标记已过期 */
+export function ageStamp(at?: string | number | null, freshMs = 6 * 3600_000, prefix = "更新"): { text: string; stale: boolean } {
+  if (at == null || at === "" || at === 0) return { text: "尚无更新", stale: true };
+  const t = typeof at === "number" ? at : Date.parse(String(at));
+  if (!Number.isFinite(t)) return { text: "尚无更新", stale: true };
+  const stale = Date.now() - t > freshMs;
+  return { text: `${prefix} ${fmtDateTime(t)}${stale ? " · 已过期" : ""}`, stale };
+}
