@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-11-23T14:57:28Z",
+  "generated_at": "2026-11-24T02:57:39Z",
   "source": "https://query1.finance.yahoo.com",
   "quotes": {
     "AAPL": {
-      "price": 348.72,
-      "change_percent": -1.1508588922274354,
+      "price": 349.08,
+      "change_percent": -1.0488122909461994,
       "currency": "USD",
       "name": "Apple Inc.",
       "daily_closes": [
@@ -26,13 +26,13 @@
         },
         {
           "t": 1795444200,
-          "c": 348.7200012207031
+          "c": 349.0799865722656
         }
       ]
     },
     "NVDA": {
-      "price": 166.88,
-      "change_percent": 6.878442423466136,
+      "price": 165.05,
+      "change_percent": 5.706417317791734,
       "currency": "USD",
       "name": "NVIDIA Corporation",
       "daily_closes": [
@@ -54,13 +54,13 @@
         },
         {
           "t": 1795444200,
-          "c": 166.8800048828125
+          "c": 165.0500030517578
         }
       ]
     },
     "TSLA": {
-      "price": 388.871,
-      "change_percent": 2.40453994838572,
+      "price": 385.46,
+      "change_percent": 1.5062937799547038,
       "currency": "USD",
       "name": "Tesla, Inc.",
       "daily_closes": [
@@ -82,13 +82,13 @@
         },
         {
           "t": 1795444200,
-          "c": 388.87109375
+          "c": 385.4599914550781
         }
       ]
     },
     "GOOGL": {
-      "price": 279.87,
-      "change_percent": -1.3569716622021777,
+      "price": 282.1,
+      "change_percent": -0.5709854786409174,
       "currency": "USD",
       "name": "Alphabet Inc.",
       "daily_closes": [
@@ -110,13 +110,13 @@
         },
         {
           "t": 1795444200,
-          "c": 279.8699951171875
+          "c": 282.1000061035156
         }
       ]
     },
     "AMZN": {
-      "price": 254.36,
-      "change_percent": -1.315227934044616,
+      "price": 255.39,
+      "change_percent": -0.9156159068865244,
       "currency": "USD",
       "name": "Amazon.com, Inc.",
       "daily_closes": [
@@ -138,13 +138,13 @@
         },
         {
           "t": 1795444200,
-          "c": 254.36000061035156
+          "c": 255.38999938964844
         }
       ]
     },
     "MSFT": {
-      "price": 502.895,
-      "change_percent": -2.9141489217938576,
+      "price": 492.5,
+      "change_percent": -4.920944419776441,
       "currency": "USD",
       "name": "Microsoft Corporation",
       "daily_closes": [
@@ -166,13 +166,13 @@
         },
         {
           "t": 1795444200,
-          "c": 502.8949890136719
+          "c": 492.5
         }
       ]
     },
     "META": {
-      "price": 587.0,
-      "change_percent": -6.291406586740312,
+      "price": 597.6,
+      "change_percent": -4.599224150316871,
       "currency": "USD",
       "name": "Meta Platforms, Inc.",
       "daily_closes": [
@@ -194,13 +194,13 @@
         },
         {
           "t": 1795444200,
-          "c": 587.00048828125
+          "c": 597.5999755859375
         }
       ]
     },
     "SPY": {
-      "price": 720.88,
-      "change_percent": -2.5772011622406943,
+      "price": 722.29,
+      "change_percent": -2.3866477464693725,
       "currency": "USD",
       "name": "State Street SPDR S&P 500 ETF T",
       "daily_closes": [
@@ -222,13 +222,13 @@
         },
         {
           "t": 1795444200,
-          "c": 720.8800048828125
+          "c": 722.2899780273438
         }
       ]
     },
     "QQQ": {
-      "price": 648.93,
-      "change_percent": -1.9372874952776842,
+      "price": 651.03,
+      "change_percent": -1.619947109935782,
       "currency": "USD",
       "name": "Invesco QQQ Trust, Series 1",
       "daily_closes": [
@@ -250,13 +250,13 @@
         },
         {
           "t": 1795444200,
-          "c": 648.9299926757812
+          "c": 651.030029296875
         }
       ]
     },
     "MSTR": {
-      "price": 87.53,
-      "change_percent": -15.04416189459381,
+      "price": 84.4,
+      "change_percent": -18.08211200621178,
       "currency": "USD",
       "name": "Strategy Inc",
       "daily_closes": [
@@ -278,13 +278,13 @@
         },
         {
           "t": 1795444200,
-          "c": 87.52999877929688
+          "c": 84.4000015258789
         }
       ]
     },
     "COIN": {
-      "price": 108.425,
-      "change_percent": -9.525200267022704,
+      "price": 108.78,
+      "change_percent": -9.228971962616829,
       "currency": "USD",
       "name": "Coinbase Global, Inc.",
       "daily_closes": [
@@ -306,13 +306,13 @@
         },
         {
           "t": 1795444200,
-          "c": 108.42500305175781
+          "c": 108.77999877929688
         }
       ]
     },
     "INTC": {
-      "price": 58.14,
-      "change_percent": 4.813412655489446,
+      "price": 59.66,
+      "change_percent": 7.553632594195059,
       "currency": "USD",
       "name": "Intel Corporation",
       "daily_closes": [
@@ -334,13 +334,13 @@
         },
         {
           "t": 1795444200,
-          "c": 58.13999938964844
+          "c": 59.65999984741211
         }
       ]
     },
     "AMD": {
-      "price": 448.96,
-      "change_percent": -10.970095978424688,
+      "price": 453.46,
+      "change_percent": -10.077734591893394,
       "currency": "USD",
       "name": "Advanced Micro Devices, Inc.",
       "daily_closes": [
@@ -362,13 +362,13 @@
         },
         {
           "t": 1795444200,
-          "c": 448.9599914550781
+          "c": 453.4599914550781
         }
       ]
     },
     "CRCL": {
-      "price": 52.28,
-      "change_percent": -9.31483087597571,
+      "price": 51.34,
+      "change_percent": -10.945359930615773,
       "currency": "USD",
       "name": "Circle Internet Group, Inc.",
       "daily_closes": [
@@ -390,13 +390,13 @@
         },
         {
           "t": 1795444200,
-          "c": 52.279998779296875
+          "c": 51.34000015258789
         }
       ]
     },
     "SNDK": {
-      "price": 91.335,
-      "change_percent": -9.693590009788512,
+      "price": 87.71,
+      "change_percent": -13.277766242497947,
       "currency": "USD",
       "name": "Sandisk Corporation",
       "daily_closes": [
@@ -411,16 +411,12 @@
         {
           "t": 1795098600,
           "c": 94.3949966430664
-        },
-        {
-          "t": 1795444200,
-          "c": 91.33499908447266
         }
       ]
     },
     "PLTR": {
-      "price": 156.15,
-      "change_percent": -2.6435563314420985,
+      "price": 159.36,
+      "change_percent": -0.6421846748550286,
       "currency": "USD",
       "name": "Palantir Technologies Inc.",
       "daily_closes": [
@@ -442,7 +438,7 @@
         },
         {
           "t": 1795444200,
-          "c": 156.14999389648438
+          "c": 159.36000061035156
         }
       ]
     }
