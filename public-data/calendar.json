@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-26T00:31:55Z",
+  "generated_at": "2026-11-26T14:02:14Z",
   "source": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
   "events": [
     {
@@ -473,6 +473,14 @@
       "impact": "Low",
       "forecast": "3.2%",
       "previous": "3.1%"
+    },
+    {
+      "title": "Euro Summit",
+      "country": "EUR",
+      "date": "2026-11-26T04:15:00-05:00",
+      "impact": "Low",
+      "forecast": "",
+      "previous": ""
     },
     {
       "title": "BOE Financial Stability Report",
